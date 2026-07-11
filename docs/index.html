@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MD-Kivy: Interactive Touchscreen Molecular Dynamics for STEM Education</title>
+  <meta name="description"
+        content="MD-Kivy introduces molecular dynamics through real-time touchscreen interaction, competitive gameplay, and physical controllers for shared STEM outreach settings.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <h1>MD-Kivy: An Interactive Touchscreen Molecular Dynamics<br>
+          Visualization for STEM Education</h1>
+      <p class="authors">
+  <a href="https://github.com/AnastasiiaBerezovska">Anastasiia A. Brund</a><sup>1</sup>,
+  <a href="#">Second Author</a><sup>1</sup>,
+  <a href="#">Third Author</a><sup>2</sup>,
+  <a href="#">Fourth Author</a><sup>1,2</sup>
+</p>
+<p class="affiliation">
+  <sup>1</sup>The University of Texas at Austin &nbsp;
+  <sup>2</sup>Texas Advanced Computing Center
+</p>
+      <div class="buttons">
+        <a class="btn disabled" href="#">Paper (coming&nbsp;soon)</a>
+        <a class="btn" href="https://github.com/AnastasiiaBerezovska/MD-Kivy">Code</a>
+        <a class="btn disabled" href="#">Video (coming&nbsp;soon)</a>
+      </div>
+    </header>
+
+    <div class="teaser">
+      <img src="images/teaser.png"
+           alt="MD-Kivy simulation of a liquid: molecules cluster under Lennard-Jones forces while live energy, pressure, and temperature statistics update on screen.">
+      <p class="caption">
+        Molecules cluster under Lennard-Jones forces while energy, pressure, and
+        temperature update live. The gauge (bottom left) and the screen-border glow
+        visualize the computational cost of the running simulation.
+      </p>
+    </div>
+
+    <section id="abstract">
+      <h2>Abstract</h2>
+      <p>
+        Traditional molecular dynamics software targets researchers or
+        individual desktop users, leaving a distinct gap for shared
+        interactive museum exhibits and public outreach tools. MD-Kivy fills
+        this gap by combining a qualitative Lennard-Jones simulation,
+        competitive two-player gameplay, and multi-device physical controller
+        support in a single open-source application designed for shared
+        public displays. Direct interaction with the simulation allows
+        learners to connect microscopic particle motion with emergent
+        macroscopic gas behaviors.
+
+        In single-player exploration mode, learners adjust Lennard-Jones
+        parameters, molecule count, simulation speed, and timestep while
+        observing particle motion in real time. By toggling intermolecular
+        forces, users can compare ideal-gas-like motion with van der
+        Waals-like interactions. Molecules are color-coded by instantaneous
+        speed, and a live computational-load display shows how pairwise force
+        calculations scale with molecule count.
+
+        In two-player battle mode, users race to spawn molecules on opposite
+        sides of a shared screen. Victory removes a central divider and
+        initiates a free expansion event, with molecules flooding into the
+        newly available volume. The platform supports optional physical
+        controllers, including Arduino accelerometers that map physical
+        shaking to kinetic energy injection and Makey Makey conductive-pad
+        boards for hands-on input. To support two identical Makey Makey
+        controllers simultaneously, MD-Kivy reads raw Linux input events
+        from each device rather than relying on the merged keyboard event
+        stream. MD-Kivy runs its physics and rendering loops at 30 Hz using
+        Kivy OpenGL canvas instructions without an external game engine.
+        The system is openly available and designed for deployment on shared
+        displays in museums and science centers.
+      </p>
+    </section>
+
+    <section id="overview">
+      <h2>System Overview</h2>
+      <p>
+        The simulation core integrates motion with Velocity-Verlet (or first-order
+        Euler, for contrast), computes vectorised Lennard-Jones forces with NumPy,
+        and resolves collisions through a spatial cell-list. Solid, liquid, and gas
+        presets initialize hexagonal close-packed lattices or free-flying ensembles,
+        and a gentle Berendsen thermostat keeps lattices stable. Every frame
+        publishes energy, temperature, and pressure to the interface.
+      </p>
+      <figure>
+        <img src="images/single_player.png"
+             alt="MD-Kivy single-player screen in gas mode with molecules bouncing freely.">
+        <figcaption>
+          Gas preset: sparse molecules fly freely; the border glow reflects CPU load.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="modes">
+      <h2>Interaction Modes</h2>
+      <div class="grid2">
+        <div class="card">
+          <h3>Sandbox</h3>
+          <p>Tap to spawn molecules, drag sliders for gravity, &epsilon;, &sigma;,
+             timestep, and speed, and toggle force visualization to watch the
+             Lennard-Jones potential at work.</p>
+        </div>
+        <div class="card">
+          <h3>Battle Mode</h3>
+          <p>Two players race to heat their side of the arena to 373.15 K.
+             The fastest time wins and feeds a persistent leaderboard - ideal
+             for outreach events and classroom competitions.</p>
+        </div>
+        <div class="card">
+          <h3>Physical Controllers</h3>
+          <p>Makey Makey boards act as per-player controllers, and an Arduino
+             accelerometer literally shakes energy into the system over USB or an
+             ESP-NOW Wi-Fi bridge.</p>
+        </div>
+        <div class="card">
+          <h3>Accuracy Awareness</h3>
+          <p>A stability badge warns when the integrator choice, timestep, or
+             molecule count threatens energy conservation, linking visual behavior
+             to numerical methods.</p>
+        </div>
+      </div>
+      <figure style="margin-top: 24px;">
+        <img src="images/battle_before_after.png"
+             alt="Battle mode before and after: (a) cyan and purple teams separated by a glowing divider; (b) the divider shatters and molecules expand into the full arena.">
+        <figcaption>
+          Battle mode: (a) two teams race to heat their half of the arena to
+          373.15&nbsp;K; (b) when one side wins, the divider shatters and the
+          molecules expand freely into the combined volume.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="physics">
+      <h2>The Physics</h2>
+      <p>
+        Pairwise interactions follow the Lennard-Jones 12-6 potential with a
+        2.5&sigma; cutoff. The force curve below shows the repulsive wall, the
+        equilibrium minimum at r&nbsp;=&nbsp;2<sup>1/6</sup>&sigma;, and the
+        attractive tail that drives condensation.
+      </p>
+      <div class="grid2">
+        <figure>
+          <img src="images/lj_potential_curve.png" alt="Lennard-Jones potential curve.">
+          <figcaption>Lennard-Jones 12-6 potential.</figcaption>
+        </figure>
+        <figure>
+          <img src="images/computational_scaling.png" alt="Computational scaling with molecule count.">
+          <figcaption>Computational cost scaling with molecule count.</figcaption>
+        </figure>
+      </div>
+      <figure style="margin-top: 24px;">
+        <img src="images/load_feedback.png"
+             alt="Two application states side by side: (a) a sparse simulation with a low Computing Load gauge and green border glow; (b) a dense, hot simulation with the gauge climbing and an energy-divergence warning shown.">
+        <figcaption>
+          Live computational-load feedback: (a) a small, stable system keeps the
+          Computing Load gauge low; (b) hundreds of hot molecules drive the gauge
+          up and trigger a stability warning, making the cost of pairwise force
+          calculations visible.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="hardware">
+      <h2>Hardware Setup</h2>
+      <p>
+        The optional hardware layer uses an Arduino with an MPU6050 accelerometer
+        (wired USB serial, or wireless via two ESP boards bridged with ESP-NOW) and
+        one or two Makey Makey boards for touch input. Sketches, wiring notes, and
+        step-by-step setup guides live in the
+        <a href="https://github.com/AnastasiiaBerezovska/MD-Kivy/tree/main/hardware">hardware/</a>
+        folder of the repository.
+      </p>
+      <figure>
+        <img src="images/hardware_controller.png"
+             alt="(a) Breadboard wiring of the wireless transmitter with a 9 V battery, voltage regulator, Arduino Nano, inertial sensor, and nRF24L01 radio; (b) the assembled controller in a laser-cut wooden enclosure held in a hand.">
+        <figcaption>
+          The wireless shake controller: (a) breadboard wiring of the
+          transmitter; (b) the assembled unit in its laser-cut enclosure.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="citation">
+      <h2>Citation</h2>
+      <pre>@misc{brund2026mdkivy,
+  title   = {MD-Kivy: An Interactive Touchscreen Molecular Dynamics
+             Visualization for STEM Education},
+  author  = {Brund, Anastasiia A. and Author, Second and Author, Third and Author, Fourth},
+  year    = {2026},
+  url     = {https://github.com/AnastasiiaBerezovska/MD-Kivy}
+}</pre>
+    </section>
+
+    <section id="acknowledgments">
+      <h2>Acknowledgments</h2>
+      <p>
+        Developed at The University of Texas at Austin with support from the Texas
+        Advanced Computing Center.
+      </p>
+    </section>
+
+    <footer>
+      <p><a href="https://github.com/AnastasiiaBerezovska/MD-Kivy">github.com/AnastasiiaBerezovska/MD-Kivy</a></p>
+    </footer>
+
+  </div>
+</body>
+</html>

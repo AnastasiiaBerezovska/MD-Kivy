@@ -1,0 +1,7 @@
+kivy>=2.1
+kivymd
+kivy-garden.graph
+numpy
+pyserial
+psutil
+evdev; platform_system == "Linux"
