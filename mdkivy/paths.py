@@ -12,5 +12,7 @@ GRAPHICS_DIR = os.path.join(ROOT, "Graphics")
 
 FONT_IMPACT = os.path.join(FONTS_DIR, "Impact.ttf")
 
-# Runtime data (gitignored)
+TAP_ICON   = os.path.join(GRAPHICS_DIR, "tap_icon.png")
+STOMP_ICON = os.path.join(GRAPHICS_DIR, "stomp_icon.png")
+
 LEADERBOARD_FILE = os.path.join(ROOT, "leaderboard.json")

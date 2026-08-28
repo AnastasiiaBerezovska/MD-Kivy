@@ -10,7 +10,7 @@ _IMPACT = FONT_IMPACT
 
 
 class SliderBox(BoxLayout):
-    """Clean slider: label + live value above, slider below - no card border."""
+    """Slider with a label and current value."""
 
     def __init__(self, label_text, min_value, max_value, default_value, step, callback,
                  info_text='', info_callback=None, **kwargs):
@@ -21,7 +21,6 @@ class SliderBox(BoxLayout):
 
         short_name = label_text.split('(')[0].strip().split()[0].upper()
 
-        # header row: name left, live value right
         header = BoxLayout(orientation='horizontal', size_hint=(1, None), height=26)
 
         self.name_label = Label(
@@ -48,7 +47,6 @@ class SliderBox(BoxLayout):
         header.add_widget(self.value_label)
         self.add_widget(header)
 
-        # slider
         self.slider = CustomSlider(
             min=min_value,
             max=max_value,

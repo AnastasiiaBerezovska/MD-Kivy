@@ -29,7 +29,6 @@ class ArduinoGraph(Widget):
         self.bind(size=self._place_label, pos=self._place_label)
         Clock.schedule_interval(self.update_graph, 0.02)
 
-    # -- helpers --------------------------------------------------------------
 
     def _colour(self, intensity):
         if intensity < 0.05:
@@ -52,10 +51,10 @@ class ArduinoGraph(Widget):
             self.top - self.motion_label.height - max(4, int(self.height * 0.06)),
         )
 
-    # -- data -----------------------------------------------------------------
 
     def add_data_point(self, value):
         if self.data_points:
+            # sensor data is noisy
             value = 0.45 * self.data_points[-1] + 0.55 * value
         self.data_points.pop(0)
         self.data_points.append(value)
@@ -75,7 +74,6 @@ class ArduinoGraph(Widget):
         self.motion_label.text  = f'Shake: {level}  ({shake_intensity:.0f}%)'
         self.motion_label.color = (r, g, b, 1)
 
-    # -- drawing ---------------------------------------------------------------
 
     def update_graph(self, dt):
         if self.height < 4:
@@ -91,17 +89,14 @@ class ArduinoGraph(Widget):
         r, g, b   = self._colour(intensity)
 
         with self.canvas:
-            # -- background ------------------------------------------------
             Color(0.03, 0.06, 0.12, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[(8, 8)] * 4)
 
-            # -- grid lines at 25 / 50 / 75 % ----------------------------
             Color(0.12, 0.20, 0.32, 0.65)
             for t in (0.25, 0.50, 0.75):
                 ty = gy + gh * t
                 Line(points=[gx, ty, gx + gw, ty], width=0.8)
 
-            # -- graph line with glow layers -------------------------------
             points = []
             for i in range(1, len(self.data_points)):
                 px = gx + (i / self.max_points) * gw
@@ -110,13 +105,12 @@ class ArduinoGraph(Widget):
 
             if len(points) >= 4:
                 Color(r, g, b, 0.10)
-                Line(points=points, width=9.0)   # outer glow
+                Line(points=points, width=9.0)
                 Color(r, g, b, 0.20)
-                Line(points=points, width=5.0)   # mid glow
+                Line(points=points, width=5.0)
                 Color(r, g, b, 1.00)
-                Line(points=points, width=1.8)   # crisp core
+                Line(points=points, width=1.8)
 
-            # -- live dot at the right edge --------------------------------
             if intensity > 0.02:
                 dot_x = gx + gw
                 dot_y = gy + intensity * gh
@@ -125,7 +119,6 @@ class ArduinoGraph(Widget):
                 Color(r, g, b, 1.0)
                 Ellipse(pos=(dot_x - 4, dot_y - 4), size=(8, 8))
 
-            # -- coloured border -------------------------------------------
             Color(r * 0.55, g * 0.55, b * 0.55, 0.70)
             Line(
                 rounded_rectangle=(self.x, self.y, self.width, self.height, 8),

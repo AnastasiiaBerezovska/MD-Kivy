@@ -5,18 +5,14 @@ from kivy.clock import Clock
 
 
 class EnergyBar(Widget):
-    """Vertical thermometer - fills and shifts colour based on system kinetic energy.
-
-    Blue = cold / stable (Verlet).
-    Red  = hot  / rising (Euler drift or energy injected).
-    """
+    """Kinetic-energy thermometer."""
 
     def __init__(self, game_area_ref=None, **kwargs):
         super().__init__(**kwargs)
         self.game_area = game_area_ref
         self._energy   = 0.0
-        self._smooth   = 0.0   # exponential smoothing
-        self._peak     = 600.0  # ceiling = avg speed in px/s (requires heavy injection to reach red)
+        self._smooth   = 0.0
+        self._peak     = 600.0
 
         self.mode_label = Label(
             text='VERLET',
@@ -40,6 +36,7 @@ class EnergyBar(Widget):
 
     def feed(self, energy):
         self._energy = float(energy)
+        # takes the edge off jumpy readings
         alpha        = 0.25
         self._smooth = (1 - alpha) * self._smooth + alpha * self._energy
 
@@ -60,8 +57,8 @@ class EnergyBar(Widget):
     def _tick(self, dt):
         if self.height < 4:
             return
-        # faster decay in Euler mode - no velocity feed there, so bar must fall on its own
         is_euler = self.game_area and not self.game_area.use_verlet
+        # euler cools down quicker
         self._smooth *= 0.97 if is_euler else 0.994
         self.canvas.clear()
 
@@ -77,40 +74,32 @@ class EnergyBar(Widget):
         fill_h  = max(0.0, bar_h * level)
 
         with self.canvas:
-            # dark background
             Color(0.03, 0.05, 0.10, 1)
             Rectangle(pos=self.pos, size=self.size)
 
-            # empty-bar track
             Color(0.10, 0.12, 0.18, 1)
             Rectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h))
 
-            # glow fill
             Color(r, g, b, 0.18)
             Rectangle(pos=(bar_x, bar_y), size=(bar_w, fill_h))
 
-            # solid centre strip
             thin = max(4, int(bar_w * 0.35))
             cx   = bar_x + (bar_w - thin) / 2
             Color(r, g, b, 0.90)
             Rectangle(pos=(cx, bar_y), size=(thin, fill_h))
 
-            # bright cap at top of fill
             if fill_h > 4:
                 Color(1, 1, 1, 0.55)
                 Rectangle(pos=(bar_x, bar_y + fill_h - 3), size=(bar_w, 3))
 
-            # tick marks at 25 / 50 / 75 %
             Color(0.30, 0.35, 0.45, 0.50)
             for t in (0.25, 0.50, 0.75):
                 ty = bar_y + bar_h * t
                 Line(points=[bar_x, ty, bar_x + bar_w, ty], width=0.8)
 
-            # outer border - colour matches fill
             Color(r * 0.55, g * 0.55, b * 0.55, 0.60)
             Line(rectangle=(self.x, self.y, self.width, self.height), width=1.1)
 
-        # mode label (top)
         mode = 'EULER' if (self.game_area and not self.game_area.use_verlet) else 'VERLET'
         fs = max(7, int(self.width * 0.45))
         self.mode_label.font_size  = f'{fs}sp'
@@ -120,7 +109,6 @@ class EnergyBar(Widget):
         self.mode_label.size       = (self.width, label_h)
         self.mode_label.pos        = (self.x, self.top - label_h - 1)
 
-        # value label (bottom) - shows per-molecule temperature
         self.val_label.font_size   = f'{fs}sp'
         self.val_label.text        = f'T={self._smooth:.1f}'
         self.val_label.texture_update()

@@ -17,6 +17,9 @@ class Molecule(Widget):
         self.parentpos = kwargs.pop("parent_pos")
         self.parentsize = kwargs.pop("parent_size")
         self.forces_visible = kwargs.pop("forces_visible")
+        self.eps    = kwargs.pop("eps", None)
+        self.sig    = kwargs.pop("sig", None)
+        self.thermo = kwargs.pop("thermo", False)
 
         super().__init__(**kwargs)
 
@@ -26,24 +29,18 @@ class Molecule(Widget):
         self._draw_sphere()
 
     def _draw_sphere(self):
-        # Draws the molecule as a pseudo-3D sphere using stacked circles.
-        # Note: self.pos is the visual center of the molecule
-        # (a quirk of this codebase - Kivy normally uses bottom-left).
         r, g, b = self.color[0], self.color[1], self.color[2]
         cx, cy = self.pos[0], self.pos[1]
         rad = self.radius
 
         with self.canvas:
-        # Glow around the molecule, matching its color
             self.glow_color = Color(r, g, b, 0.18)
             gr = rad * 1.55
             self.glow_shape = Ellipse(pos=(cx - gr, cy - gr), size=(gr * 2, gr * 2))
 
-            # Dark base so the molecule doesn't look like a flat circle
             self.base_color = Color(r * 0.15, g * 0.15, b * 0.15, 1.0)
             self.base_shape = Ellipse(pos=(cx - rad, cy - rad), size=(rad * 2, rad * 2))
 
-            # Main color of the ball - slightly smaller and shifted to fake a curved surface
             self.color_instruction = Color(r, g, b, 1.0)
             mr = rad * 0.85
             self.molecule_shape = Ellipse(
@@ -51,11 +48,10 @@ class Molecule(Widget):
                 size=(mr * 2, mr * 2)
             )
 
-            self.arrow_color = Color(0, 0.8, 1, 0)  # alpha 0 = hidden until toggled on
+            self.arrow_color = Color(0, 0.8, 1, 0)
             self.arrow_line = Line(points=[], width=max(1.0, 1.2 * rad / 10), cap='none')
 
     def _update_shape_positions(self):
-        # Move all sphere layers to follow the molecule
         cx, cy = self.pos[0], self.pos[1]
         rad = self.radius
 
@@ -83,6 +79,7 @@ class Molecule(Widget):
     def fix_force(self):
         try:
             fx, fy = self.total_force
+            # bad values spread fast here
             if not (abs(fx) < 1e15 and abs(fy) < 1e15):
                 self.total_force = Vector(0, 0)
                 return
@@ -96,7 +93,6 @@ class Molecule(Widget):
         self.pos = (self.pos[0] - new_radius + self.radius, self.pos[1] - new_radius + self.radius)
         self.radius = new_radius
         self.size = (self.radius * 2, self.radius * 2)
-        # clear and redraw everything when the size actually changes
         self.canvas.clear()
         self._draw_sphere()
 
@@ -112,9 +108,9 @@ class Molecule(Widget):
 
     def move_nonVerlet(self, delta):
         self.fix_force()
-        self.total_velocity += self.total_force * delta   # Euler: v += a*dt
+        self.total_velocity += self.total_force * delta
         self.fix_speed()
-        self.pos = self.total_velocity * delta + self.pos  # Euler: x += v*dt (less stable than Verlet)
+        self.pos = self.total_velocity * delta + self.pos
         self._update_shape_positions()
         self.bounce_off_walls()
         self.update_color_based_on_speed()
@@ -123,7 +119,7 @@ class Molecule(Widget):
     def move_verlet_a(self, delta):
         """Velocity Verlet step 1: half-kick velocity with OLD forces, then advance position."""
         self.fix_force()
-        self.total_velocity += 0.5 * self.total_force * delta   # first half-kick
+        self.total_velocity += 0.5 * self.total_force * delta
         self.fix_speed()
         self.pos = (self.pos[0] + self.total_velocity.x * delta,
                     self.pos[1] + self.total_velocity.y * delta)
@@ -133,7 +129,7 @@ class Molecule(Widget):
     def move_verlet_b(self, delta):
         """Velocity Verlet step 2: second half-kick with NEW forces computed since step A."""
         self.fix_force()
-        self.total_velocity += 0.5 * self.total_force * delta   # second half-kick
+        self.total_velocity += 0.5 * self.total_force * delta
         self.fix_speed()
         self.update_color_based_on_speed()
         self.update_force_arrow()
@@ -146,13 +142,12 @@ class Molecule(Widget):
         bottom = self.parentpos[1]
         top    = self.parentpos[1] + self.parentsize[1]
         if cx - r <= left or cx + r >= right:
-            self.total_velocity = Vector(-self.total_velocity.x, self.total_velocity.y) # bounce x velocity
+            self.total_velocity = Vector(-self.total_velocity.x, self.total_velocity.y)
         if cy - r <= bottom or cy + r >= top:
-            self.total_velocity = Vector(self.total_velocity.x, -self.total_velocity.y) # bounce y velocity
+            self.total_velocity = Vector(self.total_velocity.x, -self.total_velocity.y)
         self.keep_within_bounds()
 
     def rescale_position(self, new_pos, new_size):
-        # move molecule to follow the window
         proportion_x = (self.pos[0] - self.parentpos[0]) / self.parentsize[0]
         proportion_y = (self.pos[1] - self.parentpos[1]) / self.parentsize[1]
         self.pos = (new_size[0] * proportion_x + new_pos[0], new_size[1] * proportion_y + new_pos[1])
@@ -187,8 +182,9 @@ class Molecule(Widget):
     def push_apart(self, other):
         """Snap overlapping molecules to LJ equilibrium and kill relative normal velocity.
         At eq_dist: V = -epsilon, KE_normal = 0 -> total energy = -epsilon -> guaranteed bound state."""
-        sigma    = self.width / 2 + other.width / 2          # touching = sigma_px
-        eq_dist  = sigma * (2.0 ** (1.0 / 6.0))              # LJ minimum ~ 1.122 * sigma
+        # settle overlaps at the LJ resting distance
+        sigma    = self.width / 2 + other.width / 2
+        eq_dist  = sigma * (2.0 ** (1.0 / 6.0))
 
         p1 = Vector(self.center)
         p2 = Vector(other.center)
@@ -205,7 +201,7 @@ class Molecule(Widget):
             m2 = other.width / 2
             v1n = normal.dot(self.total_velocity)
             v2n = normal.dot(other.total_velocity)
-            v_cm_n  = (m1 * v1n + m2 * v2n) / (m1 + m2)     # shared normal velocity (CM frame)
+            v_cm_n  = (m1 * v1n + m2 * v2n) / (m1 + m2)
             tangent = Vector(-normal[1], normal[0])
             self.total_velocity  = v_cm_n * normal + tangent.dot(self.total_velocity)  * tangent
             other.total_velocity = v_cm_n * normal + tangent.dot(other.total_velocity) * tangent
@@ -213,7 +209,6 @@ class Molecule(Widget):
             other.fix_speed()
 
     def resolve_collision(self, other):
-        # 2D elastic collision along the contact normal
         v1 = self.total_velocity
         v2 = other.total_velocity
         p1 = Vector(self.center)
@@ -224,7 +219,6 @@ class Molecule(Widget):
         diff = p1 - p2
         dist = diff.length()
         min_dist = m1 + m2
-        # positional correction - push molecules apart so they never stay overlapping
         if dist < min_dist and dist > 1e-6:
             overlap = (min_dist - dist) * 0.51
             push = diff.normalize() * overlap
@@ -243,7 +237,6 @@ class Molecule(Widget):
         other.fix_speed()
 
     def update_color_based_on_speed(self):
-        # Slow molecules are dark blue; fast ones shift toward bright pink/magenta
         t = min(self.total_velocity.length(), self.speed_cap) / self.speed_cap
         r = (self.color_slow[0] + (self.color_fast[0] - self.color_slow[0]) * t) / 255
         g = (self.color_slow[1] + (self.color_fast[1] - self.color_slow[1]) * t) / 255

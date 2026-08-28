@@ -64,7 +64,6 @@ class StartScreen(Screen):
 
         self.add_widget(self.root)
 
-        # keep track if we bound the touch event
         self._touch_bound = False
 
     def force_cleanup(self):
@@ -87,11 +86,6 @@ class StartScreen(Screen):
         self.ui_rect.pos = instance.pos
         self.ui_rect.size = instance.size
 
-    # -- Video methods removed ----------------------------------------------
-    # add_video_player, play_intro_video, on_click_next_video,
-    # transition_video, on_sequence_video_end, play_loop_video
-    # all commented out - videos no longer used in this screen.
-
     def add_buttons(self, root):
         panel_w = root.width * 0.50
         panel_h = root.height * 0.11
@@ -107,7 +101,6 @@ class StartScreen(Screen):
         root.bind(size=self.update_button_panel, pos=self.update_button_panel)
         root.add_widget(self.panel_wrapper)
 
-        # CONTROLS button - centered at the bottom
         self.tutorial_button = HoverItem(
             size_hint=(0.18, 0.08),
             pos_hint={"center_x": 0.50, "center_y": 0.05},
@@ -116,7 +109,6 @@ class StartScreen(Screen):
             function=lambda x: self.show_tutorial()
         )
 
-        # BACK button - goes to the LandingScreen (3-button main menu)
         self.home_button = HoverItem(
             size_hint=(0.10, 0.06),
             pos_hint={"right": 0.99, "y": 0.01},
@@ -134,9 +126,6 @@ class StartScreen(Screen):
         if self.manager:
             self.manager.current = "LandingScreen"
 
-    # ------------------------------------------------------------------
-    # Tutorial overlay
-    # ------------------------------------------------------------------
     def _build_tutorial_overlay(self, root):
         import os as _os
         from kivy.uix.button import Button
@@ -167,7 +156,6 @@ class StartScreen(Screen):
             self._tut_border.rounded_rectangle = (inst.x, inst.y, inst.width, inst.height, 18)
         overlay.bind(pos=_upd, size=_upd)
 
-        # -- Title (always visible at top) ----------------------------------
         title = Label(
             text="HOW TO USE",
             font_name=_font, font_size=30, bold=True,
@@ -179,7 +167,6 @@ class StartScreen(Screen):
         title.bind(size=title.setter('text_size'))
         overlay.add_widget(title)
 
-        # -- GOT IT button (always visible top-right) -----------------------
         got_it = Button(
             text="CLOSE", font_name=_font, font_size=15,
             size_hint=(0.14, 0.07),
@@ -190,7 +177,6 @@ class StartScreen(Screen):
         got_it.bind(on_press=lambda *_: self.show_tutorial())
         overlay.add_widget(got_it)
 
-        # -- Scrollable content ---------------------------------------------
         scroll = ScrollView(
             size_hint=(0.97, 0.88),
             pos_hint={"center_x": 0.5, "y": 0.01},
@@ -204,7 +190,6 @@ class StartScreen(Screen):
         )
         content.bind(minimum_height=content.setter('height'))
 
-        # -- Helpers --------------------------------------------------------
         def _header(text):
             lbl = Label(
                 text=f"[b][color=00cfff]▸  {text}[/color][/b]",
@@ -230,7 +215,6 @@ class StartScreen(Screen):
             lbl.bind(size=_sz)
             return lbl
 
-        # -- Section data ---------------------------------------------------
         sections = [
             ("GETTING STARTED",
              "  • [b]Tap[/b] anywhere on the dark simulation area to [b]spawn a molecule[/b] with a random velocity.\n"
@@ -288,8 +272,8 @@ class StartScreen(Screen):
             return
         overlay = self.tutorial_overlay
         if overlay.opacity < 0.5:
-            # bring to front first
             if overlay.parent:
+                # re-add it so it stays on top
                 overlay.parent.remove_widget(overlay)
                 self.root.add_widget(overlay)
             Animation(opacity=1, duration=0.25).start(overlay)
@@ -331,7 +315,5 @@ class StartScreen(Screen):
         pass
 
     def on_pre_enter(self, *args):
-        # fade the black overlay away when entering this screen
         Animation(opacity_level=0, duration=0.5).start(self.fade_overlay)
         self.bring_buttons_to_front()
-

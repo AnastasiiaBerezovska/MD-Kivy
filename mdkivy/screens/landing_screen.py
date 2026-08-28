@@ -13,29 +13,27 @@ from mdkivy.paths import FONT_IMPACT
 _FONT = FONT_IMPACT
 
 
-def _make_nav_btn(text, accent, on_press_cb, pos_hint, size_hint=(0.20, 0.09)):
-    """Glowing nav button with a coloured border and dark fill."""
+def _make_nav_btn(text, accent, on_press_cb, pos_hint, size_hint=(0.18, 0.075)):
+    """Nav button in the shared style: accent label, dark fill, thin border."""
     r, g, b = accent
     btn = Button(
-        text=text,
-        font_name=_FONT,
-        font_size=34,
-        color=(1, 1, 1, 1),
-        background_normal='',
+        text=text, bold=True,
+        color=(r, g, b, 1),
+        background_normal='', background_down='',
         background_color=(0, 0, 0, 0),
         size_hint=size_hint,
         pos_hint=pos_hint,
     )
     with btn.canvas.before:
-        Color(r * 0.08, g * 0.08, b * 0.08, 0.92)
-        _bg = RoundedRectangle(pos=btn.pos, size=btn.size, radius=[10])
-        Color(r, g, b, 0.80)
-        _border = Line(rounded_rectangle=(btn.x, btn.y, btn.width, btn.height, 10), width=1.6)
+        Color(0.04, 0.06, 0.14, 0.90)
+        _bg = RoundedRectangle(pos=btn.pos, size=btn.size, radius=[12])
+        Color(r, g, b, 0.60)
+        _border = Line(rounded_rectangle=(btn.x, btn.y, btn.width, btn.height, 12), width=1.4)
 
     def _sync(*_):
         _bg.pos = btn.pos
         _bg.size = btn.size
-        _border.rounded_rectangle = (btn.x, btn.y, btn.width, btn.height, 10)
+        _border.rounded_rectangle = (btn.x, btn.y, btn.width, btn.height, 12)
 
     btn.bind(pos=_sync, size=_sync, on_press=lambda *_: on_press_cb())
     return btn
@@ -47,13 +45,11 @@ class LandingScreen(Screen):
 
         self._root = FloatLayout()
 
-        # Pure black background
         with self._root.canvas.before:
             Color(0, 0, 0, 1)
             self._bg = RoundedRectangle(pos=self._root.pos, size=self._root.size, radius=[0])
         self._root.bind(pos=self._update_bg, size=self._update_bg)
 
-        # Title labels - shifted up slightly to leave room for the button row
         self._label1 = Label(
             text="MOLECULAR DYNAMICS",
             font_name=_FONT,
@@ -82,8 +78,6 @@ class LandingScreen(Screen):
         self._root.add_widget(self._label1)
         self._root.add_widget(self._label2)
 
-        # -- Bottom navigation buttons --------------------------------------
-        # START (lower-center-left)
         self._btn_start = _make_nav_btn(
             text="START",
             accent=(0.3, 0.92, 1.0),
@@ -91,7 +85,6 @@ class LandingScreen(Screen):
             pos_hint={"center_x": 0.38, "y": 0.06},
         )
 
-        # GAME (lower-center-right)
         self._btn_game = _make_nav_btn(
             text="GAME",
             accent=(0.75, 0.45, 1.0),
@@ -104,21 +97,20 @@ class LandingScreen(Screen):
 
         self.add_widget(self._root)
 
-        # pulse animation via Clock
         self._pulse_t = 0.0
         self._pulse_event = None
 
-    # -- background sync ----------------------------------------------------
     def _update_bg(self, instance, *_):
         self._bg.pos = instance.pos
         self._bg.size = instance.size
 
     def _update_font_sizes(self, instance, size):
-        w = size[0]
+        w, h = size
         self._label1.font_size = max(24, w * 0.07)
         self._label2.font_size = max(18, w * 0.055)
+        for btn in (self._btn_start, self._btn_game):
+            btn.font_size = max(14, h * 0.030)
 
-    # -- navigation ---------------------------------------------------------
     def _go_to_game(self):
         if self.manager:
             self.manager.current = "GameScreen"
@@ -127,7 +119,6 @@ class LandingScreen(Screen):
         if self.manager:
             self.manager.current = "BattleNameScreen"
 
-    # -- pulse animation ----------------------------------------------------
     def _pulse_tick(self, dt):
         self._pulse_t += dt
         t = self._pulse_t
@@ -154,6 +145,7 @@ class LandingScreen(Screen):
 
     def on_enter(self, *args):
         self._update_font_sizes(self._root, self._root.size)
+        # no reason to pulse off screen
         if self._pulse_event is None:
             self._pulse_event = Clock.schedule_interval(self._pulse_tick, 1 / 30)
 

@@ -5,17 +5,13 @@ from kivy.clock import Clock
 
 
 class EnergyInputWidget(Widget):
-    """Touch-and-drag panel to inject kinetic energy into molecules.
-
-    Drag distance -> energy boost -> molecules speed up -> temperature rises.
-    Pulsing orange/red circle shows how much energy was just added.
-    """
+    """Touch control for adding kinetic energy."""
 
     def __init__(self, game_area_ref=None, **kwargs):
         super().__init__(**kwargs)
         self.game_area  = game_area_ref
         self._touch_pos = None
-        self._pulse     = 0.0   # 0-1, decays after injection
+        self._pulse     = 0.0
 
         self.hint = Label(
             text='[b]TOUCH & DRAG\nto inject energy[/b]',
@@ -29,7 +25,6 @@ class EnergyInputWidget(Widget):
         self.bind(pos=self._place_hint, size=self._place_hint)
         Clock.schedule_interval(self._tick, 0.05)
 
-    # -- hint label placement --------------------------------------------------
 
     def _place_hint(self, *args):
         self.hint.text_size   = (self.width * 0.85, None)
@@ -41,7 +36,6 @@ class EnergyInputWidget(Widget):
             self.center_y - self.hint.height / 2,
         )
 
-    # -- touch handling --------------------------------------------------------
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
@@ -59,6 +53,7 @@ class EnergyInputWidget(Widget):
             self._pulse     = max(self._pulse, amount)
             if self.game_area and amount > 0.01:
                 self.game_area.inject_energy(amount)
+            # measure from the last touch event
             self._touch_pos = touch.pos
             return True
         return super().on_touch_move(touch)
@@ -69,7 +64,6 @@ class EnergyInputWidget(Widget):
             return True
         return super().on_touch_up(touch)
 
-    # -- drawing ---------------------------------------------------------------
 
     def _tick(self, dt):
         if self.height < 4:
@@ -96,11 +90,9 @@ class EnergyInputWidget(Widget):
                 r2  = rad * 0.38
                 Ellipse(pos=(cx - r2, cy - r2), size=(r2 * 2, r2 * 2))
 
-            # border - brightens when injecting
             border_a = 0.35 + e * 0.50
             Color(r * 0.70, g * 0.70, b * 0.70, border_a)
             Line(rectangle=(self.x, self.y, self.width, self.height), width=1.2)
 
-        # hide hint while actively injecting
         self.hint.opacity = max(0.0, 1.0 - e * 7)
         self._place_hint()

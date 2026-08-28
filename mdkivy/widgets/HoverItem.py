@@ -19,8 +19,6 @@ class HoverItem(Image, HoverBehavior):
             self.pos_hint = kwargs.pop("pos_hint")
         super().__init__(**kwargs)
         self.source = self.defaultSource
-        # Disable KivyMD's sibling-coverage check - it leaves hovering=True after a panel
-        # opens on top, which permanently blocks on_enter from working again.
         self.detect_visible = False
 
     def on_enter(self, *args):
@@ -38,8 +36,7 @@ class HoverItem(Image, HoverBehavior):
             self.use = True
             self.source = self.hoverSource
             self.function(0)
-            # Reset hovering so on_enter re-fires on next mouse movement.
-            # Without this, hovering stays True and on_enter is permanently skipped.
+            # let hover fire again after a click
             self.hovering = False
             return True
         self.use = False

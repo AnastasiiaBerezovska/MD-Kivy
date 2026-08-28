@@ -1,9 +1,5 @@
 from kivy.config import Config
-# Drive input only from the OS-calibrated cursor. The raw multitouch device on
-# the exhibit touchscreen reports mis-mapped coordinates (a left tap lands on
-# the right), which fired the wrong buttons and spawned molecules in the wrong
-# place. The touchscreen still works because X delivers it as a calibrated
-# pointer that the mouse provider reads.
+# use the calibrated pointer from the OS
 Config.remove_section('input')
 Config.add_section('input')
 Config.set('input', 'mouse', 'mouse,disable_multitouch')
@@ -13,7 +9,7 @@ from kivy.app import App
 from kivy.core.window import Window
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 
-# Below this size the HUD panels collide and the battle arena collapses
+# keep the panels usable on smaller windows
 Window.minimum_width  = 1054
 Window.minimum_height = 713
 from mdkivy.screens.game_screen import GameScreen
@@ -34,7 +30,7 @@ class WindowManager(ScreenManager):
         self.leaderboard_screen = kwargs.pop("leaderboard_screen")
 
         super().__init__(**kwargs)
-        self.transition = NoTransition()   # instant switch - no touch leaking between screens
+        self.transition = NoTransition()
 
         self.add_widget(self.landing_screen)
         self.add_widget(self.start_screen)

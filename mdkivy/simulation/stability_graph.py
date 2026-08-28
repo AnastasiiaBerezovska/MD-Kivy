@@ -36,6 +36,7 @@ class StabilityGraph(Widget):
         return (1.00, 0.32, 0.32)
 
     def _draw(self, dt):
+        # skip work while the card is hidden
         if self.height < 4 or self.opacity < 0.05:
             return
         self.canvas.clear()
@@ -53,17 +54,14 @@ class StabilityGraph(Widget):
             Color(0.02, 0.04, 0.10, 0.97)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[(8, 8)] * 4)
 
-            # grid lines
             Color(0.12, 0.20, 0.32, 0.55)
             for t in (0.25, 0.50, 0.75):
                 ty = gy + gh * t
                 Line(points=[gx, ty, gx + gw, ty], width=0.8)
 
-            # stable-zone threshold line at 0.8
             Color(0.30, 0.92, 0.45, 0.30)
             Line(points=[gx, gy + gh * 0.8, gx + gw, gy + gh * 0.8], width=1.4)
 
-            # graph line with glow
             if len(pts) >= 2:
                 points = []
                 for i, v in enumerate(pts):
@@ -77,7 +75,6 @@ class StabilityGraph(Widget):
                 Color(r, g, b, 1.00)
                 Line(points=points, width=1.8)
 
-            # live dot
             dot_x = gx + gw
             dot_y = gy + score * gh
             Color(1, 1, 1, 0.50)
@@ -85,6 +82,5 @@ class StabilityGraph(Widget):
             Color(r, g, b, 1.0)
             Ellipse(pos=(dot_x - 4, dot_y - 4), size=(8, 8))
 
-            # border
             Color(r * 0.55, g * 0.55, b * 0.55, 0.70)
             Line(rounded_rectangle=(self.x, self.y, self.width, self.height, 8), width=1.4)

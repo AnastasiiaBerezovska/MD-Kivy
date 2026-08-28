@@ -7,14 +7,12 @@ disguised spellings are caught too.
 """
 import re
 
-# Leetspeak / symbol substitutions applied before matching
 _SUBS = str.maketrans({
     '0': 'o', '1': 'i', '!': 'i', '3': 'e', '4': 'a', '@': 'a',
     '5': 's', '$': 's', '7': 't', '8': 'b', '9': 'g', '6': 'g',
     '+': 't', '|': 'i',
 })
 
-# Kept lowercase; matched as substrings of the normalized name.
 _BLOCKED = (
     'fuck', 'fuk', 'fck', 'fack', 'phuck', 'shit', 'sht', 'bitch', 'btch', 'cunt',
     'cock', 'dick', 'dik', 'penis', 'pussy', 'vagina', 'boob', 'tit',
@@ -27,8 +25,7 @@ _BLOCKED = (
     'milf', 'thot', 'simp',
 )
 
-# Short words that only count as whole words, otherwise normal names
-# like "Cassidy" (ass) or "Sexton" (sex) would be rejected.
+# avoids blocking names like Cassidy
 _WHOLE_WORD_ONLY = {'ass', 'hoe', 'tit', 'cum', 'bj', 'sex', 'kill'}
 
 

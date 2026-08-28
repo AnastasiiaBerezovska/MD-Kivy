@@ -10,7 +10,7 @@ from mdkivy.paths import GRAPHICS_DIR
 
 
 class TextBlurb(Widget):
-    """Toggleable info popup - dark navy card with cyan border, bold white text, close button."""
+    """Information popup."""
     is_visible = BooleanProperty(False)
     text       = StringProperty("This is a text blurb.")
     font_size  = NumericProperty(11)
@@ -22,7 +22,7 @@ class TextBlurb(Widget):
         super().__init__(**kwargs)
         self.size_hint = (None, None)
         self.size = (400, 200)
-        self.opacity = 0   # whole widget starts invisible; animated in
+        self.opacity = 0
 
         with self.canvas.before:
             self.bg_color = Color(0.04, 0.07, 0.15, 1.0)
@@ -46,7 +46,6 @@ class TextBlurb(Widget):
         self.text_label.bind(size=self._update_text_size)
         self.add_widget(self.text_label)
 
-        # PNG close button - top-right corner
         _close_normal = os.path.join(GRAPHICS_DIR, "Close.png")
         _close_hover  = os.path.join(GRAPHICS_DIR, "Close_Highlighted.png")
         self._close_btn = Button(
@@ -64,13 +63,9 @@ class TextBlurb(Widget):
         self.bind(parent=self._bind_parent_events)
 
     def on_touch_down(self, touch):
-        # A hidden popup must not intercept taps: several popups overlap at the
-        # same spot, and an invisible one on top would otherwise swallow the
-        # close-button tap meant for the visible one (and block spawning).
+        # hidden cards should not block the game
         if not self.is_visible:
             return False
-        # Visible: let the close button handle its tap, and swallow taps on the
-        # card body so nothing spawns in the game area behind it.
         if super().on_touch_down(touch):
             return True
         return self.collide_point(*touch.pos)

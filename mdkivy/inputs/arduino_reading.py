@@ -6,51 +6,38 @@ import serial
 from serial.tools import list_ports
 
 class ArduinoReading:
-    """Lightweight non-blocking reader for Arduino data over Serial or TCP (wireless).
-
-    Features:
-    - Serial mode: auto-detects a likely Arduino port if none is specified.
-    - TCP mode: connects to an ESP/Arduino TCP server (e.g., ESP8266/ESP32 Wi‑Fi bridge).
-    - Honors env vars: ARDUINO_MODE, ARDUINO_PORT, ARDUINO_BAUD, ARDUINO_TCP_HOST, ARDUINO_TCP_PORT.
-    - Parses multiple formats, e.g. "X = 1 | Y = 2 | Z = 3" or "X: 1, Y: 2, Z: 3".
-    - Returns None if no new complete line is available (non-blocking in UI loop).
-    """
+    """Non-blocking serial or TCP reader for Arduino sensor data."""
 
     def __init__(self, port=None, baud_rate=None, tcp_host=None, tcp_port=None, mode=None):
-        # Env overrides
         env_mode = (os.getenv("ARDUINO_MODE") or '').lower().strip()
         env_port = os.getenv("ARDUINO_PORT")
         env_baud = os.getenv("ARDUINO_BAUD")
         env_tcp_host = os.getenv("ARDUINO_TCP_HOST")
         env_tcp_port = os.getenv("ARDUINO_TCP_PORT")
 
-        # Determine transport
+        # tcp when a host is set, serial otherwise
         self.mode = (mode or env_mode or '').lower() or ('tcp' if (tcp_host or env_tcp_host) else 'serial')
 
-        # State
         self.serial_connection = None
         self.sock = None
         self._rx_buffer = b""
-        self._line_buffer = []  # Buffer to collect X, Y, Z lines
+        self._line_buffer = []
         self._temp_x = None
         self._temp_y = None
         self._temp_z = None
         self.last_xyz = None
-        self.last_button = None  # 'HIGH'/'LOW'
-        self.last_analog = None  # int
+        self.last_button = None
+        self.last_analog = None
 
-        # Regex patterns - added pattern to match Arduino's newline-separated format
         self._patterns = [
             re.compile(r"X\s*=\s*(-?\d+)\s*\|\s*Y\s*=\s*(-?\d+)\s*\|\s*Z\s*=\s*(-?\d+)"),
             re.compile(r"X\s*:\s*(-?\d+)\s*,\s*Y\s*:\s*(-?\d+)\s*,\s*Z\s*:\s*(-?\d+)"),
-            # pattern for "X: value\nY: value\nZ: value" format
             re.compile(r"X\s*:\s*(-?\d+).*?Y\s*:\s*(-?\d+).*?Z\s*:\s*(-?\d+)", re.DOTALL)
         ]
         self._btn_pat = re.compile(r"\b(HIGH|LOW)\b", re.IGNORECASE)
-        self._analog_pat = re.compile(r"\b(\d{1,5})\b")  # just a number
+        self._analog_pat = re.compile(r"\b(\d{1,5})\b")
 
         if self.mode == 'tcp':
-            # TCP mode (wireless)
             self.tcp_host = tcp_host or env_tcp_host or '192.168.4.1'
             self.tcp_port = int(tcp_port or (env_tcp_port or 8888))
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -61,7 +48,6 @@ class ArduinoReading:
             self.baud_rate = None
             time.sleep(0.2)
         else:
-            # Serial mode (default)
             self.port = port or env_port or self._auto_detect_port()
             if self.port is None:
                 raise RuntimeError("No Arduino port found - Makey Makey skipped, no other serial device detected")
@@ -94,7 +80,6 @@ class ArduinoReading:
                 usb_iface = os.path.realpath(device_link)
                 usb_dev   = os.path.dirname(usb_iface)
 
-                # 1. Product name check
                 prod_path = os.path.join(usb_dev, 'product')
                 if os.path.exists(prod_path):
                     with open(prod_path) as f:
@@ -103,7 +88,6 @@ class ArduinoReading:
                         makey_ports.add(f'/dev/{tty_name}')
                         continue
 
-                # 2. VID check (SparkFun/JoyLabz)
                 vid_path = os.path.join(usb_dev, 'idVendor')
                 if os.path.exists(vid_path):
                     with open(vid_path) as f:
@@ -111,13 +95,11 @@ class ArduinoReading:
                             makey_ports.add(f'/dev/{tty_name}')
                             continue
 
-                # 3. HID interface check - Makey Makey is a keyboard AND a serial port;
-                #    real Arduinos (Uno, Mega, Nano) only have CDC interfaces, never HID.
                 for entry in os.listdir(usb_dev):
                     iface_class = os.path.join(usb_dev, entry, 'bInterfaceClass')
                     if os.path.exists(iface_class):
                         with open(iface_class) as f:
-                            if f.read().strip() == '03':   # 03 = HID
+                            if f.read().strip() == '03':
                                 makey_ports.add(f'/dev/{tty_name}')
                                 break
             except Exception:
@@ -130,6 +112,7 @@ class ArduinoReading:
         Looks for known VID/PID or ttyACM*/ttyUSB* names. Returns a string or default '/dev/ttyACM0'.
         Skips Makey Makey devices even when they report as 'Arduino Leonardo' (VID 2341).
         """
+        # makey boards show up as serial devices too
         makey_ports = ArduinoReading._find_makey_ports()
 
         candidates = []
@@ -150,18 +133,16 @@ class ArduinoReading:
 
         if candidates:
             return candidates[0]
-        # No suitable port found - don't fall back to a Makey Makey port
         return None
 
     def _parse_xyz_line(self, line: str):
-        # Try existing patterns first (single-line formats)
-        for pat in self._patterns[:2]:  # Only the first two patterns
+        for pat in self._patterns[:2]:
             m = pat.search(line)
             if m:
                 x, y, z = map(int, m.groups())
                 return x, y, z
         
-        # Try to parse individual X:, Y:, Z: lines
+        # some sketches send one axis per line
         x_match = re.search(r"X\s*:\s*(-?\d+)", line)
         y_match = re.search(r"Y\s*:\s*(-?\d+)", line)
         z_match = re.search(r"Z\s*:\s*(-?\d+)", line)
@@ -172,7 +153,6 @@ class ArduinoReading:
             self._temp_y = int(y_match.group(1))
         if z_match:
             self._temp_z = int(z_match.group(1))
-        # when we get Z, thats all three values
             if hasattr(self, '_temp_x') and hasattr(self, '_temp_y'):
                 return self._temp_x, self._temp_y, self._temp_z
         
@@ -198,6 +178,7 @@ class ArduinoReading:
             except Exception:
                 return None
             if b"\n" in self._rx_buffer:
+                # keep partial tcp lines for the next read
                 line, _, rest = self._rx_buffer.partition(b"\n")
                 self._rx_buffer = rest
                 return line.rstrip(b"\r")
@@ -213,17 +194,14 @@ class ArduinoReading:
         except Exception:
             return False
 
-        # Parse XYZ
         xyz = self._parse_xyz_line(line)
         if xyz:
             self.last_xyz = xyz
 
-        # Parse HIGH/LOW
         m = self._btn_pat.search(line)
         if m:
             self.last_button = m.group(1).upper()
 
-        # try to get a number from the data
         m2 = self._analog_pat.search(line)
         if m2:
             try:

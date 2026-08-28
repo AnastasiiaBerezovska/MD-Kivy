@@ -71,7 +71,7 @@ class DualMakeyInput:
         self._stop       = threading.Event()
         self._threads    = []
         self._devices    = []
-        # ignore events for 1 second after startup to avoid spurious state replay
+        # evdev replays held keys when it opens
         self._ready_after = _time.monotonic() + 1.0
         self._start()
 
@@ -92,7 +92,7 @@ class DualMakeyInput:
             t = threading.Thread(
                 target=self._read_loop,
                 args=(dev, cb, side),
-                daemon=True, # threads will close automatically when the main program exits
+                daemon=True,
                 name=f'DualMakey-{side}',
             )
             t.start()
@@ -104,8 +104,7 @@ class DualMakeyInput:
             print(f'[DUAL MAKEY] Ready is LEFT={devices[0].name}, RIGHT={devices[1].name}')
 
     def _read_loop(self, device, callback, side):
-        # minimum seconds between accepted presses for this device
-        # filters contact bounce (rapid hardware key events from a single press)
+        # floor pads bounce
         DEBOUNCE = 0.35
         last_fire = 0.0
         try:
@@ -113,13 +112,12 @@ class DualMakeyInput:
             for event in device.read_loop():
                 if self._stop.is_set():
                     break
-                # skip all events during the startup grace period
                 if _time.monotonic() < self._ready_after:
                     continue
                 if event.type == evdev.ecodes.EV_KEY and event.value == 1:
                     now = _time.monotonic()
                     if now - last_fire < DEBOUNCE:
-                        continue   # bounce isto ignore
+                        continue
                     last_fire = now
                     Clock.schedule_once(lambda dt, cb=callback: cb())
         except Exception as e:

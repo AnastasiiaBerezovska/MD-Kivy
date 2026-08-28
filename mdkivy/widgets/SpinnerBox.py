@@ -19,7 +19,6 @@ class SpinnerBox(FloatLayout):
         self._on_expand_cb = on_expand
         self._animating = False
 
-        # Center image: PRESETS when collapsed, preset name when expanded
         self.presets_img = Image(
             source="Graphics/Presets.png",
             size_hint=(0.55, 0.85),
@@ -30,11 +29,10 @@ class SpinnerBox(FloatLayout):
             pos_hint={"center_x": 0.5, "center_y": 0.5},
             hoverSource=f"Graphics/{possibleValues[defaultValue]}.png",
             defaultSource=f"Graphics/{possibleValues[defaultValue]}.png",
-            function=lambda x: self.toggle_expand(),  # tap preset name to collapse
+            function=lambda x: self.toggle_expand(),
             opacity=0,
         )
 
-        # Arrows use absolute positioning so we can animate their x
         self.left_arrow = HoverItem(
             size_hint=(None, None),
             hoverSource="Graphics/Left-Arrow_Highlighted.png",
@@ -55,7 +53,6 @@ class SpinnerBox(FloatLayout):
 
         self.bind(pos=self._place_arrows, size=self._place_arrows)
 
-    # --- helpers ---
 
     def _aw(self):
         return max(20, self.width * 0.16)
@@ -77,10 +74,10 @@ class SpinnerBox(FloatLayout):
         margin = self.width * 0.02
         return self.x + margin, self.x + self.width - aw - margin
 
-    # --- layout ---
 
     def _place_arrows(self, *args):
         """Snap arrows to the correct position (no animation) - used on resize."""
+        # resizing mid-animation makes it jump
         if self._animating:
             return
         aw, ah = self._aw(), self._ah()
@@ -93,7 +90,6 @@ class SpinnerBox(FloatLayout):
         self.left_arrow.x = lx
         self.right_arrow.x = rx
 
-    # --- touch ---
 
     def on_touch_down(self, touch):
         """Any tap when collapsed -> expand."""
@@ -102,7 +98,6 @@ class SpinnerBox(FloatLayout):
             return True
         return super().on_touch_down(touch)
 
-    # --- expand / collapse ---
 
     def toggle_expand(self):
         from kivy.animation import Animation
@@ -138,13 +133,13 @@ class SpinnerBox(FloatLayout):
         if self._on_expand_cb:
             self._on_expand_cb(self.expanded)
 
-    # --- arrow interaction ---
 
     def _on_arrow(self, delta):
         if self.expanded:
             self.updateState(delta)
 
     def updateState(self, delta):
+        # loop around at the ends
         self.value = (self.value + delta) % len(self.possibleValues)
         preset = self.possibleValues[self.value]
         self.spinner.source = f"Graphics/{preset}.png"
