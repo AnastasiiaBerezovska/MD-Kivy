@@ -483,7 +483,7 @@ class BattleScreen(Screen):
             return
         m = random.choice(side)
         self._molecules.remove(m)
-        cr, cg, cb = (0.25, 0.80, 1.0) if team == 'left' else (0.92, 0.94, 1.0)
+        cr, cg, cb = (0.16, 0.50, 0.95) if team == 'left' else (0.48, 0.20, 0.90)
         life = 0.50
         self._pops.append({
             'x': m['x'], 'y': m['y'],
@@ -852,9 +852,9 @@ class BattleScreen(Screen):
                 heat = min(spd / SPAWN_SPEED, 1.0)
 
                 if m['team'] == 'left':
-                    cr, cg, cb = 0.09 + 0.26*heat, 0.15 + 0.33*heat, 0.60 + 0.40*heat
+                    cr, cg, cb = 0.02 + 0.18*heat, 0.07 + 0.28*heat, 0.50 + 0.38*heat
                 else:
-                    cr, cg, cb = 0.74 + 0.26*heat, 0.76 + 0.24*heat, 0.80 + 0.20*heat
+                    cr, cg, cb = 0.36 + 0.28*heat, 0.20 + 0.24*heat, 0.58 + 0.30*heat
 
                 gr = r * 1.55
                 Color(cr, cg, cb, 0.16)
