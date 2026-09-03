@@ -22,15 +22,52 @@ from kivy.animation import Animation
 import numpy as np
 
 
+# Fixed reduced reference units used by both the equations of motion and the
+# three readouts. The starred quantities displayed by the UI are
+#
+#   E* = E / E0,  T* = k_B T / E0,
+#   P* = P L0^2 / E0  (two-dimensional pressure).
+#
+# E0 is the energy represented by epsilon=1, and L0 is 50 screen pixels.
+# They are dimensionless model quantities, not joules, pascals, or degrees C.
+# A speed of 50 px/s is one reduced velocity unit. With m* = k_B* = 1 this gives
+#
+#   KE* = 1/2 (v / VELOCITY_UNIT)^2
+#   T*  = 2 KE* / (DOF N)
+#   P*  = (N T* + virial / DOF) / area*
+#
+# Keeping the conversion in one place is important: the old LJ acceleration
+# implicitly used the on-screen molecule diameter as a mass conversion, so a
+# window resize changed the physics and made the displayed energy jump.
+# Largest integration step the Lennard-Jones r^-12 core tolerates. At the
+# frame step of 1/60 s the repulsion is too stiff to integrate and the system
+# gains energy steadily: measured +271 over ten seconds with 40 molecules,
+# against -1 at 0.004 and 0 at 0.002. Each frame is therefore split into
+# several equal sub-steps, which keeps the simulation running at the same
+# apparent speed while integrating stably.
+PHYSICS_SUBSTEP = 0.004
+MAX_SUBSTEPS    = 6
+
+DOF = 2
+K_B = 1.0
+VELOCITY_UNIT = 50.0
+LENGTH_UNIT = 50.0
+INVERSE_MASS = VELOCITY_UNIT ** 2
+
+
 class GameLayout(Widget):
 
     intermolecular_forces = BooleanProperty(False)
-    epsilon = NumericProperty(50.0)
+    # epsilon=1 defines the model's fixed reduced energy unit E0.  Starting
+    # the free-form sandbox at 50 made its interactions fifty times stronger
+    # than the validated solid/liquid/gas presets as soon as Forces was
+    # enabled, causing the apparent energy and temperature "explosion".
+    epsilon = NumericProperty(1.0)
     sigma = NumericProperty(1.0)
     spring_constant = 100.0
     spring_rest_length = 2.0
     molecule_radius_ratio = 0.03
-    use_verlet = False
+    use_verlet = True
     
 
     def __init__(self, performance_monitor, arduino_graph = None, **kwargs):
@@ -55,6 +92,10 @@ class GameLayout(Widget):
 
         self._lj_viz_group = InstructionGroup()
         self.canvas.add(self._lj_viz_group)
+        # Active force-line instructions are retained between style refreshes.
+        # Their endpoints can then follow molecules every frame without
+        # clearing and rebuilding the entire graphics group.
+        self._lj_viz_lines = {}
 
         self.frame_counter = 0
         self.performance_monitor = performance_monitor
@@ -103,6 +144,19 @@ class GameLayout(Widget):
         self._last_spawn_t = 0.0
 
         self._energy_history = deque(maxlen=120)
+
+        # Lennard-Jones potential energy of the current configuration, refreshed
+        # by _apply_lj_forces_numpy. Zero when forces are off.
+        self._lj_potential = 0.0
+        self._lj_virial = 0.0
+        self._forces_initialized = False
+
+        # The microscopic values legitimately move from frame to frame. The UI
+        # shows a short time average so the numbers are readable, while the raw
+        # values remain available to monitoring and tests.
+        self._metric_ema = {'energy': None, 'temperature': None, 'pressure': None}
+        self._metric_raw = {'energy': 0.0, 'temperature': 0.0, 'pressure': 0.0}
+        self._metric_tau = {'energy': 0.45, 'temperature': 0.85, 'pressure': 1.10}
 
         self.thermostat_active = False
         self.thermostat_target_speed = 30.0
@@ -157,7 +211,8 @@ class GameLayout(Widget):
         self._makey_left_last = now
         cx = self.pos[0] + self.size[0] * uniform(0.15, 0.45)
         cy = self.pos[1] + self.size[1] * uniform(0.2, 0.8)
-        self.spawn_molecule_at_touch(type('_T', (), {'pos': (cx, cy)})())
+        if not self.spawn_molecule_at_touch(type('_T', (), {'pos': (cx, cy)})()):
+            return
         self.makey_left_count += 1
         self.show_key_feedback(f'[color=00cfff]LEFT[/color]  #{self.makey_left_count}')
 
@@ -173,7 +228,8 @@ class GameLayout(Widget):
         self._makey_right_last = now
         cx = self.pos[0] + self.size[0] * uniform(0.55, 0.85)
         cy = self.pos[1] + self.size[1] * uniform(0.2, 0.8)
-        self.spawn_molecule_at_touch(type('_T', (), {'pos': (cx, cy)})())
+        if not self.spawn_molecule_at_touch(type('_T', (), {'pos': (cx, cy)})()):
+            return
         self.makey_right_count += 1
         self.show_key_feedback(f'[color=ff9900]RIGHT[/color]  #{self.makey_right_count}')
 
@@ -300,18 +356,21 @@ class GameLayout(Widget):
     def adjust_gravity(self, change):
         """change gravity value and update the slider"""
         self.gravity = max(0, min(self.gravity + change, 10))
+        self._forces_initialized = False
         if self.gravity_slider:
             self.gravity_slider.value = self.gravity
 
     def adjust_epsilon(self, change):
         """change epsilon value and update slider"""
         self.epsilon = max(0, min(self.epsilon + change, 10))
+        self._forces_initialized = False
         if self.epsilon_slider:
             self.epsilon_slider.value = self.epsilon
 
     def adjust_sigma(self, change):
         """change sigma value and update slider"""
         self.sigma = max(0.1, min(self.sigma + change, 3))
+        self._forces_initialized = False
         if self.sigma_slider:
             self.sigma_slider.value = self.sigma
 
@@ -340,6 +399,7 @@ class GameLayout(Widget):
         self.scale = 2 * self.molecule_radius
         for molecule in self.molecules:
             molecule.fix_radius(self.molecule_radius)
+        self._forces_initialized = False
 
     def create_bond(self, molecule1, molecule2):
         """create a bond line between two molecules"""
@@ -463,12 +523,89 @@ class GameLayout(Widget):
         )
 
     def spawn_molecule_at_touch(self, touch):
-        """Spawn a molecule centred on the touch, with a random velocity."""
+        """Add a molecule without injecting a repulsive-core energy spike.
+
+        A particle created directly under another particle can begin with an
+        enormous positive LJ potential. Find the nearest position where it is
+        at least one pair-equilibrium distance from every neighbour. Its speed
+        is chosen to match the sample's current kinetic temperature instead of
+        using the old, very hot hard-coded speed of 300 px/s.
+        """
+        requested = (float(touch.pos[0]), float(touch.pos[1]))
+        position = self._nearest_clear_spawn_position(requested)
+        if position is None:
+            self.show_key_feedback('[color=ff7043]NO SAFE SPACE[/color]')
+            return False
+
+        if self.molecules:
+            current_temperature = max(self._thermodynamic_metrics()[1], 0.0)
+        else:
+            current_temperature = 0.5
+        speed = self._speed_for(current_temperature)
         angle = uniform(-math.pi, math.pi)
-        vx = 300 * math.cos(angle)
-        vy = 300 * math.sin(angle)
-        self.create_molecule(touch.pos[0] + 50, touch.pos[1] + 50, vx, vy)
+        vx = speed * math.cos(angle)
+        vy = speed * math.sin(angle)
+        # Molecule's legacy constructor starts with Kivy's 100x100 default
+        # widget size, so +50 keeps its simulation position centred on the
+        # requested point. Changing that convention would move every preset.
+        self.create_molecule(position[0] + 50, position[1] + 50, vx, vy)
         self.molecules[-1].update_color_based_on_speed()
+        return True
+
+    def _spawn_position_is_clear(self, x, y, require_beaker):
+        """Whether a new molecule fits at a simulation position without a
+        visual overlap or positive LJ pair energy."""
+        radius = self.molecule_radius
+        if not (self.x + radius <= x <= self.right - radius and
+                self.y + radius <= y <= self.top - radius):
+            return False
+
+        if require_beaker:
+            # Check the full disk rather than its centre so it does not start
+            # embedded in the flask wall.
+            if not all(self.beaker.contains(px, py) for px, py in (
+                    (x, y), (x - radius, y), (x + radius, y),
+                    (x, y - radius), (x, y + radius))):
+                return False
+
+        new_sigma = self.sigma
+        equilibrium_factor = 2.0 ** (1.0 / 6.0)
+        for molecule in self.molecules:
+            old_sigma = self.sigma if molecule.sig is None else molecule.sig
+            pair_sigma_px = 0.5 * (new_sigma + old_sigma) * self.scale
+            lj_clearance = equilibrium_factor * pair_sigma_px
+            visual_clearance = radius + molecule.radius
+            clearance = 1.01 * max(lj_clearance, visual_clearance)
+            dx = x - molecule.pos[0]
+            dy = y - molecule.pos[1]
+            if dx * dx + dy * dy < clearance * clearance:
+                return False
+        return True
+
+    def _nearest_clear_spawn_position(self, requested):
+        """Return the nearest safe position to a requested insertion point."""
+        x0, y0 = requested
+        require_beaker = self.beaker.active and self.beaker.contains(x0, y0)
+        if self._spawn_position_is_clear(x0, y0, require_beaker):
+            return (x0, y0)
+
+        # Concentric sampling is deterministic and naturally finds the edge
+        # of a dense solid when the user taps inside the lattice.
+        step = max(self.molecule_radius * 0.75, 12.0)
+        max_radius = math.hypot(self.width, self.height)
+        rings = int(math.ceil(max_radius / step))
+        for ring in range(1, rings + 1):
+            search_radius = ring * step
+            samples = max(12, int(math.ceil(2.0 * math.pi * search_radius /
+                                             (step * 0.65))))
+            phase = (ring * 0.38196601125) * 2.0 * math.pi
+            for sample in range(samples):
+                angle = phase + 2.0 * math.pi * sample / samples
+                x = x0 + search_radius * math.cos(angle)
+                y = y0 + search_radius * math.sin(angle)
+                if self._spawn_position_is_clear(x, y, require_beaker):
+                    return (x, y)
+        return None
         
     def start_simulation(self):
         """start the update loop"""
@@ -498,7 +635,7 @@ class GameLayout(Widget):
         self.thermostat_active = False
         self.stop_simulation()
         self.clear_molecules()
-        self._lj_viz_group.clear()
+        self._clear_lj_viz()
         self.intermolecular_forces = False
         self.bonds_visible = False
         self.forces_visible = False
@@ -506,18 +643,18 @@ class GameLayout(Widget):
     def reset_all_params(self):
         """Reset molecules and parameters."""
         self.reset_simulation()
-        self.epsilon    = 50.0
+        self.epsilon    = self.SUBSTANCE_EPSILON
         self.sigma      = 1.0
         self.delta      = 1 / 60.0
         self.gravity    = 0.0
-        self.use_verlet = False
+        self.use_verlet = True
         self._speed_factor  = 1.0
         self._base_interval = 1 / 30.0
         self.size_factor      = 0.6
         self.molecule_radius  = self.size[0] * self.molecule_radius_ratio * self.size_factor
         self.scale = 2 * self.molecule_radius
         defaults = {
-            'epsilon_slider': 50.0,
+            'epsilon_slider': self.SUBSTANCE_EPSILON,
             'sigma_slider':   1.0,
             'delta_slider':   1 / 60.0,
             'gravity_slider': 0.0,
@@ -528,6 +665,8 @@ class GameLayout(Widget):
             sl = getattr(self, slider_attr, None)
             if sl is not None:
                 sl.value = val
+
+        self._reset_metric_display()
 
     def inject_energy(self, amount):
         """Boost all molecule velocities randomly ==> called by slider or also EnergyInputWidget name if applicable."""
@@ -567,20 +706,146 @@ class GameLayout(Widget):
         self.scale = 2 * self.molecule_radius
         for molecule in self.molecules:
             molecule.fix_radius(self.molecule_radius)
+        self._forces_initialized = False
 
     def toggle_update_mode(self):
         self.use_verlet = not self.use_verlet
+        self._forces_initialized = False
 
+    def _refresh_forces(self):
+        """Calculate acceleration and thermodynamic LJ terms at current positions."""
+        beaker_g = self.beaker.view_gravity()
+        for molecule in self.molecules:
+            molecule.reset_total_force()
+            g = self.gravity
+            if beaker_g and self.beaker.contains(*molecule.pos):
+                g += beaker_g
+            molecule.add_force(Vector(0, -g))
+
+        self.apply_spring_force()
+        if self.intermolecular_forces and len(self.molecules) >= 2:
+            self._apply_lj_forces_numpy()
+        else:
+            self._lj_potential = 0.0
+            self._lj_virial = 0.0
+        self._forces_initialized = True
+
+    def _thermodynamic_metrics(self):
+        """Return instantaneous (total energy, temperature, pressure).
+
+        All three values use the same reduced units. Pressure is the 2-D
+        virial pressure; unlike the previous sum-of-absolute-speeds proxy it
+        includes area and intermolecular attraction/repulsion.
+        """
+        n = len(self.molecules)
+        if n == 0:
+            return 0.0, 0.0, 0.0
+
+        kinetic = 0.0
+        gravitational = 0.0
+        beaker_g = self.beaker.view_gravity()
+        bottom = self.pos[1]
+        beaker_bottom = self.beaker.outer[1]
+        inside_beaker = 0
+        for molecule in self.molecules:
+            try:
+                speed = molecule.total_velocity.length()
+            except (OverflowError, ValueError):
+                molecule.total_velocity = Vector(0, 0)
+                speed = 0.0
+            kinetic += 0.5 * (speed / VELOCITY_UNIT) ** 2
+
+            y = molecule.pos[1]
+            gravitational += (self.gravity * max(y - bottom, 0.0)
+                              / INVERSE_MASS)
+            is_inside_beaker = self.beaker.active and self.beaker.contains(*molecule.pos)
+            if is_inside_beaker:
+                inside_beaker += 1
+            if beaker_g and is_inside_beaker:
+                gravitational += (beaker_g * max(y - beaker_bottom, 0.0)
+                                  / INVERSE_MASS)
+
+        temperature = 2.0 * kinetic / (DOF * n * K_B)
+        area_px = self.size[0] * self.size[1]
+        if self.beaker.active and inside_beaker == n:
+            area_px = self.beaker.interior_area
+        area_reduced = max(area_px / (LENGTH_UNIT ** 2), 1e-9)
+        pressure = (n * K_B * temperature + self._lj_virial / DOF) / area_reduced
+        total_energy = kinetic + self._lj_potential + gravitational
+        return total_energy, temperature, pressure
+
+    def _smooth_metrics(self, values, dt):
+        """Low-pass the displayed values without altering the simulation."""
+        out = {}
+        dt = max(float(dt), 1 / 240.0)
+        for name, value in values.items():
+            previous = self._metric_ema[name]
+            if previous is None or not math.isfinite(previous):
+                smoothed = value
+            else:
+                alpha = 1.0 - math.exp(-dt / self._metric_tau[name])
+                smoothed = previous + alpha * (value - previous)
+            self._metric_ema[name] = smoothed
+            out[name] = smoothed
+        return out
+
+    def _reset_metric_display(self):
+        self._metric_ema = {'energy': None, 'temperature': None, 'pressure': None}
+        self._metric_raw = {'energy': 0.0, 'temperature': 0.0, 'pressure': 0.0}
+        for attr in ('total_energy_label', 'temperature_label', 'pressure_label'):
+            label = getattr(self, attr, None)
+            if label is not None:
+                label.text = '0.0'
+
+
+    def _integrate(self, step_dt, first=False):
+        """One physics sub-step: collide, recompute forces, advance.
+
+        `first` finishes the half Verlet step update() already started for this
+        frame; later sub-steps open their own.
+        """
+        if self.use_verlet and not first:
+            self._refresh_forces()
+            for mol in self.molecules:
+                mol.speed_cap = 2000
+                mol.move_verlet_a(step_dt)
+
+        coll_cell = max(self.molecule_radius * 3, 40)
+        for mol1, mol2 in self._spatial_pairs(coll_cell):
+            dx    = mol2.center_x - mol1.center_x
+            dy    = mol2.center_y - mol1.center_y
+            sum_r = (mol1.width + mol2.width) * 0.5
+            if abs(dx) <= sum_r and abs(dy) <= sum_r and mol1.collide_widget(mol2):
+                if self.intermolecular_forces:
+                    # Do not teleport an LJ pair to equilibrium. The r^-12
+                    # repulsion supplies the collision response; positional
+                    # correction here would silently delete potential energy.
+                    pass
+                else:
+                    mol1.resolve_collision(mol2)
+                mol1.update_color_based_on_speed()
+                mol2.update_color_based_on_speed()
+
+        self._refresh_forces()
+
+        for mol in self.molecules:
+            if not self.use_verlet:
+                mol.speed_cap = 2000
+                mol.move_nonVerlet(step_dt)
+
+        if self.use_verlet:
+            for mol in self.molecules:
+                mol.move_verlet_b(step_dt)
+
+        if self.beaker.active:
+            for mol in self.molecules:
+                self.beaker.collide(mol)
 
     def update(self, dt):
         """
         Update molecule positions, handle collisions, and update bonds.
         Arduino integration affects: gravity, kinetic energy, temperature, and pressure.
         """
-        total_energy = 0
-        temperature = 0
-        pressure = 0
-
         arduino_data = self.arduino.get_xyz() if self.arduino else None
         if arduino_data:
             x, y, z = arduino_data
@@ -626,19 +891,16 @@ class GameLayout(Widget):
         else:
             scale_factor = 1.0
 
-        # old forces first
+        # Velocity Verlet needs forces at x(t) for the first half-kick. They
+        # are cached between later steps and invalidated whenever state changes.
         if self.use_verlet:
+            if not self._forces_initialized:
+                self._refresh_forces()
+            steps = max(1, min(MAX_SUBSTEPS,
+                               int(math.ceil(self.delta / PHYSICS_SUBSTEP))))
             for mol in self.molecules:
-                mol.speed_cap = 500
-                mol.move_verlet_a(self.delta)
-
-        beaker_g = self.beaker.view_gravity()
-        for molecule in self.molecules:
-            molecule.reset_total_force()
-            g = self.gravity
-            if beaker_g and self.beaker.contains(*molecule.pos):
-                g += beaker_g
-            molecule.add_force(Vector(0, -g))
+                mol.speed_cap = 2000
+                mol.move_verlet_a(self.delta / steps)
 
         new_radius = self.size[0] * self.molecule_radius_ratio * self.size_factor
         if abs(new_radius - self._last_molecule_radius) > 0.1:
@@ -647,14 +909,9 @@ class GameLayout(Widget):
             self._last_molecule_radius = new_radius
             for mol in self.molecules:
                 mol.fix_radius(self.molecule_radius)
-        self.apply_spring_force()
-
         self.frame_counter += 1
         if self.frame_counter % 5 == 0:
             self.update_bond_lines()
-        if self.frame_counter % 8 == 0:
-            if self.bonds_visible:
-                self._update_lj_viz()
         if self.frame_counter % 10 == 0:
             visible = random.sample(self.molecules, min(len(self.molecules), 10))
             for molecule in visible:
@@ -663,39 +920,29 @@ class GameLayout(Widget):
                     molecule.update_force_arrow()
             self.update_bond_lines()
 
-        coll_cell = max(self.molecule_radius * 3, 40)
-        for mol1, mol2 in self._spatial_pairs(coll_cell):
-            dx    = mol2.center_x - mol1.center_x
-            dy    = mol2.center_y - mol1.center_y
-            sum_r = (mol1.width + mol2.width) * 0.5
-            if abs(dx) <= sum_r and abs(dy) <= sum_r and mol1.collide_widget(mol2):
-                if self.intermolecular_forces:
-                    # LJ already handles the pushback
-                    mol1.push_apart(mol2)
-                else:
-                    mol1.resolve_collision(mol2)
-                mol1.update_color_based_on_speed()
-                mol2.update_color_based_on_speed()
-
-        if self.intermolecular_forces and len(self.molecules) >= 2:
-            self._apply_lj_forces_numpy()
-
         do_arrows = self.forces_visible and (self.frame_counter % self.arrow_update_every == 0)
-        for mol in self.molecules:
-            if do_arrows:
+        if do_arrows:
+            for mol in self.molecules:
                 mol.update_force_arrow()
-            if not self.use_verlet:
-                mol.speed_cap = 2000
-                mol.move_nonVerlet(self.delta)
 
-        # finish with the new forces
-        if self.use_verlet:
-            for mol in self.molecules:
-                mol.move_verlet_b(self.delta)
+        # Integrate in sub-steps small enough for the repulsive core. The
+        # remaining half of this frame's Verlet step was already taken above,
+        # so the first sub-step completes it and the rest are whole steps.
+        steps  = max(1, min(MAX_SUBSTEPS,
+                            int(math.ceil(self.delta / PHYSICS_SUBSTEP))))
+        sub_dt = self.delta / steps
+        for step in range(steps):
+            self._integrate(sub_dt, first=(step == 0))
 
-        if self.beaker.active:
-            for mol in self.molecules:
-                self.beaker.collide(mol)
+        # Recalculate which interactions are visible and their colour only at
+        # the old throttled cadence, but move existing line endpoints after
+        # every physics frame. This removes the visible 8-frame lag without
+        # adding an O(n^2) graphics rebuild to every update.
+        if self.bonds_visible:
+            if self.frame_counter % 8 == 0 or not self._lj_viz_lines:
+                self._update_lj_viz()
+            else:
+                self._update_lj_viz_positions()
 
         damped = [m for m in self.molecules
                   if self.thermostat_active or m.thermo]
@@ -706,21 +953,13 @@ class GameLayout(Widget):
                 for m in damped:
                     m.total_velocity = m.total_velocity * scale
 
-        for molecule1 in self.molecules:
-            try:
-                velocity_magnitude = molecule1.total_velocity.length()
-            except (OverflowError, ValueError):
-                molecule1.total_velocity = Vector(0, 0)
-                velocity_magnitude = 0.0
-            normalized_velocity = velocity_magnitude / 50.0
-            kinetic_energy = 0.5 * (normalized_velocity ** 2)
-            total_energy += kinetic_energy * scale_factor
-            temperature += kinetic_energy * scale_factor
-            momentum = (abs(molecule1.total_velocity.x) + abs(molecule1.total_velocity.y)) / 50.0 
-            pressure += momentum * scale_factor
-
-        num_molecules = len(self.molecules) if len(self.molecules) > 0 else 1
-        avg_temperature = temperature / num_molecules
+        total_energy, avg_temperature, pressure = self._thermodynamic_metrics()
+        self._metric_raw = {
+            'energy': total_energy,
+            'temperature': avg_temperature,
+            'pressure': pressure,
+        }
+        displayed = self._smooth_metrics(self._metric_raw, dt)
 
         if self.energy_bar is not None and self.molecules and self.use_verlet:
             total_spd = 0.0
@@ -732,11 +971,12 @@ class GameLayout(Widget):
             self.energy_bar.feed(total_spd / len(self.molecules))
 
         if self.frame_counter % self.ui_update_every == 0:
-            self.total_energy_label.text = f"{total_energy:.2f}"
-
-            self.temperature_label.text = f"{avg_temperature:.2f}"
-
-            self.pressure_label.text = f"{pressure:.2f}"
+            energy_shown = 0.0 if abs(displayed['energy']) < 0.05 else displayed['energy']
+            temp_shown = 0.0 if abs(displayed['temperature']) < 0.005 else displayed['temperature']
+            pressure_shown = 0.0 if abs(displayed['pressure']) < 0.005 else displayed['pressure']
+            self.total_energy_label.text = f"{energy_shown:,.1f}"
+            self.temperature_label.text = f"{temp_shown:,.2f}"
+            self.pressure_label.text = f"{pressure_shown:,.2f}"
 
         self.performance_monitor.update_simulation_metrics(
             molecule_count=len(self.molecules),
@@ -774,11 +1014,10 @@ class GameLayout(Widget):
         if not self.use_verlet:
             warnings.append({
                 'severity': 'medium',
-                'title': 'Euler integration — energy not conserved',
+                'title': 'Euler integration — larger energy error',
                 'detail': (
-                    'Euler just adds the current force and keeps going each step. '
-                    'Small errors pile up every frame, so total kinetic energy drifts '
-                    'upward indefinitely — not physical. '
+                    'Euler updates the velocity and position in a single pass. '
+                    'Its total-energy error is larger and can oscillate or drift over time. '
                     'Switch to Verlet (WHY? panel) for stable, energy-conserving integration.'
                 ),
             })
@@ -849,14 +1088,17 @@ class GameLayout(Widget):
     def set_gravity(self, value):
         """Update gravity for all molecules based on slider value."""
         self.gravity = value
+        self._forces_initialized = False
 
     def set_epsilon(self, value):
         """Update the epsilon parameter for Lennard-Jones potential."""
         self.epsilon = value
+        self._forces_initialized = False
 
     def set_sigma(self, value):
         """Update the sigma parameter for Lennard-Jones potential."""
         self.sigma = value
+        self._forces_initialized = False
         if self.intermolecular_forces:
             self._push_apart_lj()
 
@@ -900,9 +1142,10 @@ class GameLayout(Widget):
     def toggle_intermolecular_forces(self):
         """Toggle LJ force computation; lines follow forces when turning on/off."""
         self.intermolecular_forces = not self.intermolecular_forces
+        self._forces_initialized = False
         self.bonds_visible = self.intermolecular_forces
         if not self.bonds_visible:
-            self._lj_viz_group.clear()
+            self._clear_lj_viz()
         else:
             mols = self.molecules
             for i in range(len(mols)):
@@ -913,7 +1156,18 @@ class GameLayout(Widget):
         """Hide/show LJ viz lines without touching the physics calculation."""
         self.bonds_visible = not self.bonds_visible
         if not self.bonds_visible:
-            self._lj_viz_group.clear()
+            self._clear_lj_viz()
+
+    def _clear_lj_viz(self):
+        """Remove all cached Lennard-Jones visualization instructions."""
+        self._lj_viz_group.clear()
+        self._lj_viz_lines.clear()
+
+    def _update_lj_viz_positions(self):
+        """Move cached force-line endpoints to the current molecule positions."""
+        for (mol1, mol2), (_color, line) in self._lj_viz_lines.items():
+            line.points = [mol1.pos[0], mol1.pos[1],
+                           mol2.pos[0], mol2.pos[1]]
 
     def toggle_force_arrows(self):
         """Toggle directional force arrows on each molecule."""
@@ -930,14 +1184,15 @@ class GameLayout(Widget):
         Force is attractive for r* > 2^(1/6)           -> cyan/blue line, fades at cutoff.
         Line disappears near the equilibrium where force ~ 0.
         """
-        self._lj_viz_group.clear()
         if not self.bonds_visible or len(self.molecules) < 2:
+            self._clear_lj_viz()
             return
 
         sigma_px  = max(self.sigma * self.scale, 1.0)
         cutoff_px = self.lj_cutoff_sigma * sigma_px
         equil     = 2.0 ** (1.0 / 6.0)
 
+        visible_pairs = set()
         for i in range(len(self.molecules)):
             mol1 = self.molecules[i]
             for j in range(i + 1, len(self.molecules)):
@@ -956,20 +1211,41 @@ class GameLayout(Widget):
                 strength = min(math.log1p(f_abs) / 6.0, 1.0)
 
                 if r_star < equil:
-                    self._lj_viz_group.add(Color(1.0, 0.6 - 0.5 * strength, 0.0, 0.35 + 0.55 * strength))
+                    rgba = (1.0, 0.6 - 0.5 * strength, 0.0,
+                            0.35 + 0.55 * strength)
                     lw = 1.0 + 3.0 * strength
                 else:
                     fade = 1.0 - (r_star - equil) / (self.lj_cutoff_sigma - equil)
                     fade = max(fade, 0.0)
                     if fade < 0.05:
                         continue
-                    self._lj_viz_group.add(Color(0.0, 0.7 + 0.3 * fade, 1.0, 0.15 + 0.55 * fade))
+                    rgba = (0.0, 0.7 + 0.3 * fade, 1.0,
+                            0.15 + 0.55 * fade)
                     lw = 1.0 + 1.5 * fade
 
-                self._lj_viz_group.add(Line(
-                    points=[mol1.pos[0], mol1.pos[1], mol2.pos[0], mol2.pos[1]],
-                    width=lw
-                ))
+                pair = (mol1, mol2)
+                visible_pairs.add(pair)
+                cached = self._lj_viz_lines.get(pair)
+                if cached is None:
+                    color = Color(*rgba)
+                    line = Line(
+                        points=[mol1.pos[0], mol1.pos[1],
+                                mol2.pos[0], mol2.pos[1]],
+                        width=lw)
+                    self._lj_viz_group.add(color)
+                    self._lj_viz_group.add(line)
+                    self._lj_viz_lines[pair] = (color, line)
+                else:
+                    color, line = cached
+                    color.rgba = rgba
+                    line.width = lw
+                    line.points = [mol1.pos[0], mol1.pos[1],
+                                   mol2.pos[0], mol2.pos[1]]
+
+        for pair in set(self._lj_viz_lines) - visible_pairs:
+            color, line = self._lj_viz_lines.pop(pair)
+            self._lj_viz_group.remove(color)
+            self._lj_viz_group.remove(line)
 
     def toggle_forces_visible(self):
         """Toggle intermolecular forces on or off."""
@@ -1011,12 +1287,27 @@ class GameLayout(Widget):
         attract = rSqInv * rSqInv * rSqInv
         repel   = attract * attract
 
-        fOverR = np.where(mask,
-                          24.0 * eps_ij * (2.0 * repel - attract) * rSqInv,
-                          0.0)
+        # -dU/dr in pixel coordinates, converted to acceleration with the same
+        # reduced mass used by KE*. The previous expression used 1/r*^2 here,
+        # which introduced an extra sigma_px^2 and made forces depend on window
+        # size even though the displayed potential energy did not.
+        pair_scalar = 24.0 * eps_ij * (2.0 * repel - attract)
+        force_over_r = np.where(mask, pair_scalar / np.maximum(r2, 1e-12), 0.0)
+        accel_over_r = force_over_r * INVERSE_MASS
 
-        fvec = fOverR[:, :, np.newaxis] * (-diff)
+        fvec = accel_over_r[:, :, np.newaxis] * (-diff)
         net  = fvec.sum(axis=1)
+
+        # Total LJ potential energy, truncated AND shifted so V(r_cut) = 0.
+        # Without the shift each pair crossing the cutoff steps the total by a
+        # finite amount, which shows up as flicker in the readout.
+        rc6  = 1.0 / (self.lj_cutoff_sigma ** 6)
+        vcut = 4.0 * eps_ij * (rc6 * rc6 - rc6)
+        # matrix counts each pair twice, so x0.5
+        self._lj_potential = 0.5 * float(
+            np.sum(np.where(mask, 4.0 * eps_ij * (repel - attract) - vcut, 0.0)))
+        # sum r_ij . F_ij over unique pairs; the matrix contains both ij and ji
+        self._lj_virial = 0.5 * float(np.sum(np.where(mask, pair_scalar, 0.0)))
 
         for i, m in enumerate(mols):
             m.total_force.x += float(net[i, 0])
@@ -1114,19 +1405,54 @@ class GameLayout(Widget):
         except Exception:
             print("[Slider boost error] trigger_boost unavailable")
 
-    def generate_solid(self):
-        """A compact block of molecules locked in a lattice, floating together.
+    # One substance, three states. epsilon and sigma describe the MATERIAL and
+    # are the same in every preset - water is water whether it is ice, liquid or
+    # steam. Only temperature (initial speed) and density (spacing and count)
+    # differ, so the phase emerges from the Lennard-Jones physics rather than
+    # being hardcoded. Speeds come from equipartition: in 2D, KE_avg = k_B T,
+    # and KE here is 0.5*(v/50)^2, so v = 50*sqrt(2 T*).
+    SUBSTANCE_EPSILON = 1.0
+    SUBSTANCE_SIGMA   = 1.0
 
-        Not the whole play area: a solid is a lump you can see the edges of, so
-        it reads as one object against the liquid and gas presets.
-        """
-        self._apply_physics_preset(gravity=0, epsilon=5.0, sigma=1.0)
+    SOLID_TEMPERATURE = 0.15
+    LIQUID_TEMPERATURE = 0.65
+    GAS_TEMPERATURE = 3.0
+
+    @staticmethod
+    def _speed_for(t_star):
+        """Initial speed giving reduced temperature T* (2D equipartition)."""
+        return VELOCITY_UNIT * math.sqrt(max(DOF * K_B * t_star, 0.0))
+
+    def _set_phase_temperature(self, molecules, temperature):
+        """Give a group zero-drift random velocities at an exact initial T*."""
+        if not molecules:
+            return
+        velocities = []
+        target_speed = self._speed_for(temperature)
+        for _ in molecules:
+            angle = uniform(-math.pi, math.pi)
+            velocities.append(Vector(math.cos(angle), math.sin(angle)))
+
+        mean = sum(velocities, Vector(0, 0)) / len(velocities)
+        velocities = [v - mean for v in velocities]
+        rms = math.sqrt(sum(v.length2() for v in velocities) / len(velocities))
+        factor = target_speed / rms if rms > 1e-12 else 0.0
+        for molecule, velocity in zip(molecules, velocities):
+            molecule.total_velocity = velocity * factor
+            molecule.update_color_based_on_speed()
+        self._forces_initialized = False
+
+    def generate_solid(self):
+        """Cold and dense: a lattice at the LJ minimum, barely moving.
+        T* well below the triple point (~0.69), so it holds its shape."""
+        self._apply_physics_preset(gravity=0,
+                                   epsilon=self.SUBSTANCE_EPSILON,
+                                   sigma=self.SUBSTANCE_SIGMA)
         self.clear_molecules()
 
-        r_eq    = (2 ** (1.0 / 6.0)) * self.sigma * self.scale
-        spacing = max(r_eq, 2.0 * self.molecule_radius)
+        spacing = max((2 ** (1.0 / 6.0)) * self.sigma * self.scale,
+                      2.0 * self.molecule_radius)
         dx = spacing
-        # hex rows pack without overlaps
         dy = spacing * (3.0 ** 0.5) / 2.0
 
         cols = rows = 7
@@ -1136,50 +1462,88 @@ class GameLayout(Widget):
         x0 = self.pos[0] + (self.size[0] - block_w) / 2.0 + offset
         y0 = self.pos[1] + (self.size[1] - block_h) / 2.0 + offset
 
+        new_molecules = []
         for row in range(rows):
             y = y0 + row * dy
             xs = x0 + (dx / 2.0 if row % 2 else 0.0)
             for col in range(cols):
                 self.create_molecule(xs + col * dx, y, 0, 0)
+                new_molecules.append(self.molecules[-1])
 
-        self.thermostat_active = True
-        self.thermostat_target_speed = 25.0
+        self._set_phase_temperature(new_molecules, self.SOLID_TEMPERATURE)
+        self.thermostat_active = False
 
     def generate_liquid(self):
-        """A cohesive blob - molecules slip past each other but stay together."""
+        """Dense but disordered, near the triple point: cohesive yet flowing."""
         self.thermostat_active = False
         self._preset_boost()
-        self._apply_physics_preset(gravity=0, epsilon=2.0, sigma=1.0)
+        self._apply_physics_preset(gravity=0,
+                                   epsilon=self.SUBSTANCE_EPSILON,
+                                   sigma=self.SUBSTANCE_SIGMA)
         self.clear_molecules()
 
         offset = 50
         cx = self.pos[0] + self.size[0] / 2.0 + offset
         cy = self.pos[1] + self.size[1] / 2.0 + offset
-        blob = min(self.size[0], self.size[1]) * 0.24
+        blob = min(self.size[0], self.size[1]) * 0.26
 
-        for _ in range(48):
-            ang = uniform(0, 2 * math.pi)
-            d = blob * math.sqrt(uniform(0.0, 1.0))
-            self.create_molecule(cx + d * math.cos(ang), cy + d * math.sin(ang),
-                                 uniform(-60, 60), uniform(-60, 60))
+        # Seeded on a lattice, not at random. Random placement in a dense blob
+        # guarantees overlapping pairs, and the r^-12 energy that releases
+        # heats the sample far past its intended temperature - the liquid
+        # boiled off and ended hotter than the gas. Spacing is a little wider
+        # than the solid, so the sample is less dense and melts rather than
+        # holding a lattice.
+        spacing = max(1.16 * (2 ** (1.0 / 6.0)) * self.sigma * self.scale,
+                      2.1 * self.molecule_radius)
+        dx = spacing
+        dy = spacing * (3.0 ** 0.5) / 2.0
+        rows_n = int(blob * 2 / dy) + 1
+
+        placed = 0
+        for row in range(-rows_n, rows_n + 1):
+            y = cy + row * dy
+            xs = cx + (dx / 2.0 if row % 2 else 0.0)
+            col = -rows_n
+            while col <= rows_n:
+                x = xs + col * dx
+                col += 1
+                if (x - cx) ** 2 + (y - cy) ** 2 > blob * blob:
+                    continue
+                if placed >= 48:
+                    break
+                self.create_molecule(x, y, 0, 0)
+                placed += 1
+        self._set_phase_temperature(self.molecules, self.LIQUID_TEMPERATURE)
 
     def generate_gas(self):
-        """Create the gas preset."""
+        """Hot and sparse: T* far above the triple point and low density, so
+        attraction cannot hold anything together."""
         self.thermostat_active = False
         self._preset_boost()
-        self._apply_physics_preset(gravity=0, epsilon=0.3, sigma=1.5)
+        self._apply_physics_preset(gravity=0,
+                                   epsilon=self.SUBSTANCE_EPSILON,
+                                   sigma=self.SUBSTANCE_SIGMA)
         self.clear_molecules()
 
         offset = 50
         pad = max(self.molecule_radius * 2, 40)
+        points = []
+        min_sep = max(1.25 * self.sigma * self.scale, 2.1 * self.molecule_radius)
         for _ in range(20):
-            x = uniform(self.pos[0] + pad, self.pos[0] + self.size[0] - pad) + offset
-            y = uniform(self.pos[1] + pad, self.pos[1] + self.size[1] - pad) + offset
-            self.create_molecule(x, y, uniform(-350, 350), uniform(-350, 350))
+            for _attempt in range(200):
+                x = uniform(self.pos[0] + pad, self.pos[0] + self.size[0] - pad)
+                y = uniform(self.pos[1] + pad, self.pos[1] + self.size[1] - pad)
+                if all((x - px) ** 2 + (y - py) ** 2 >= min_sep ** 2
+                       for px, py in points):
+                    points.append((x, y))
+                    self.create_molecule(x + offset, y + offset, 0, 0)
+                    break
+        self._set_phase_temperature(self.molecules, self.GAS_TEMPERATURE)
 
     def toggle_beaker(self):
         """Show or hide the flask."""
         self.beaker.active = not self.beaker.active
+        self._forces_initialized = False
         self.draw_beaker()
         return self.beaker.active
 
@@ -1187,6 +1551,7 @@ class GameLayout(Widget):
         """SIDE puts gravity on inside the glass and opens the mouth;
         TOP looks straight down, so the boundary closes into a circle."""
         self.beaker.orientation = orientation
+        self._forces_initialized = False
         self.draw_beaker()
 
     def fill_beaker(self, phase):
@@ -1227,26 +1592,35 @@ class GameLayout(Widget):
             gy = fly + (sly - fly) * f
             lo = flx + (slx - flx) * f
             hi = frx + (srx - frx) * f
-            group.add(Line(points=[lo + (hi - lo) * 0.55, gy, hi - (hi - lo) * 0.12, gy],
-                           width=1.1))
+            group.add(Line(points=[lo + (hi - lo) * 0.55, gy,
+                                     hi - (hi - lo) * 0.12, gy], width=1.1))
 
         group.add(Color(0.74, 0.87, 0.97, 0.95))
         flat = []
         for px, py in pts:
             flat.extend((px, py))
-        group.add(Line(points=flat, width=b.wall * 0.45, joint='round', cap='round'))
+        group.add(Line(points=flat, width=b.wall * 0.45,
+                       joint='round', cap='round'))
 
         group.add(Color(0.92, 0.97, 1.0, 0.90))
         lip = (nrx - nlx) * 0.30
-        group.add(Line(points=[nlx - lip, nly, nlx, nly], width=b.wall * 0.45, cap='round'))
-        group.add(Line(points=[nrx, nry, nrx + lip, nry], width=b.wall * 0.45, cap='round'))
+        group.add(Line(points=[nlx - lip, nly, nlx, nly],
+                       width=b.wall * 0.45, cap='round'))
+        group.add(Line(points=[nrx, nry, nrx + lip, nry],
+                       width=b.wall * 0.45, cap='round'))
 
     def clear_molecules(self):
         """remove all molecules from the game"""
         self.clear_bonds()
+        self._clear_lj_viz()
         for molecule in self.molecules:
             self.remove_widget(molecule)
         self.molecules.clear()
+        self._lj_potential = 0.0
+        self._lj_virial = 0.0
+        self._forces_initialized = False
+        self._reset_metric_display()
+        self._energy_history.clear()
         gc.collect()
 
     def create_molecule(self, x, y, vx, vy, eps=None, sig=None, thermo=False):
@@ -1267,3 +1641,4 @@ class GameLayout(Widget):
         )
         self.add_widget(molecule)
         self.molecules.append(molecule)
+        self._forces_initialized = False

@@ -180,8 +180,15 @@ class Molecule(Widget):
         return distance <= (self.width / 2 + other.width / 2)
 
     def push_apart(self, other):
-        """Snap overlapping molecules to LJ equilibrium and kill relative normal velocity.
-        At eq_dist: V = -epsilon, KE_normal = 0 -> total energy = -epsilon -> guaranteed bound state."""
+        """Separate an overlapping pair without taking energy out of the system.
+
+        This used to set both molecules' normal velocity to their shared
+        centre-of-mass value - a perfectly inelastic collision - to make
+        clusters stick. It also destroyed the relative kinetic energy on every
+        contact, so total energy fell ~90% in a closed system and nothing was
+        conserved. Overlaps are now resolved positionally only; the Lennard-
+        Jones force does the binding, which is what it is there for.
+        """
         # settle overlaps at the LJ resting distance
         sigma    = self.width / 2 + other.width / 2
         eq_dist  = sigma * (2.0 ** (1.0 / 6.0))
@@ -196,15 +203,6 @@ class Molecule(Widget):
             correction = (eq_dist - dist) / 2.0
             self.center  = (p1 + normal * correction)[:]
             other.center = (p2 - normal * correction)[:]
-
-            m1 = self.width / 2
-            m2 = other.width / 2
-            v1n = normal.dot(self.total_velocity)
-            v2n = normal.dot(other.total_velocity)
-            v_cm_n  = (m1 * v1n + m2 * v2n) / (m1 + m2)
-            tangent = Vector(-normal[1], normal[0])
-            self.total_velocity  = v_cm_n * normal + tangent.dot(self.total_velocity)  * tangent
-            other.total_velocity = v_cm_n * normal + tangent.dot(other.total_velocity) * tangent
             self.fix_speed()
             other.fix_speed()
 

@@ -573,8 +573,13 @@ class GameScreen(Screen):
 
     def generated_selected_preset(self, preset):
         """Fill with the chosen phase - into the flask when it is on screen,
-        otherwise across the whole play area."""
+        otherwise across the whole play area. The empty sandbox starts with
+        forces off, but a material phase needs intermolecular forces to exist,
+        so choosing Solid, Liquid, or Gas enables them. The user can turn them
+        off afterward to see the phase lose cohesion.
+        """
         phase = preset.lower()
+        self._forces_on()
         if self.game_area.beaker.active:
             self.game_area.fill_beaker(phase)
         elif preset == "Solid":
@@ -678,13 +683,13 @@ class GameScreen(Screen):
         self.verlet_text = TextBlurb(
             text=(
                 "Both methods predict where a molecule moves next -- but they do it differently.\n\n"
-                "EULER: takes the current speed and says 'just keep going'. "
-                "Fast and simple, but small errors build up every step -- like rolling a ball "
-                "and ignoring that gravity curves its path. Over time energy drifts upward.\n\n"
-                "VERLET: also looks at WHERE the molecule was last step to correct the next move. "
-                "This cancels most errors, keeping energy stable for much longer.\n\n"
-                "Try it: switch to Euler and watch the energy bar slowly climb red on its own. "
-                "Switch back to Verlet and it stabilises. Same molecules, different math."
+                "EULER: updates speed from the current force, then advances the molecule. "
+                "It is fast and simple, but its energy error is much larger and may oscillate "
+                "or drift over long runs.\n\n"
+                "VERLET: uses a half-step before and after recalculating the force. "
+                "For conservative forces this keeps total energy nearly constant for much longer.\n\n"
+                "Try it: compare the total-energy reading with Euler and Verlet. "
+                "Same molecules, different numerical accuracy."
             ),
             parent_size_prop=(0.28, 0.28),
             parent_pos_prop=(0.848, 0.22))
@@ -795,7 +800,7 @@ class GameScreen(Screen):
 
         self._stab_popup = FloatLayout(
             size_hint=(0.34, None), height=dp(230),
-            pos_hint={'right': 0.975, 'top': 0.75},
+            pos_hint={'right': 0.975},
             opacity=0,
         )
         with self._stab_popup.canvas.before:
@@ -877,6 +882,13 @@ class GameScreen(Screen):
         c = self._stab_popup
         if c.width < 10:
             return
+
+        # Sit directly under the top bar. Anchoring to the buttons' real bottom
+        # rather than a fixed fraction keeps the gap the same on any display,
+        # since bar height derives from _UI_H and that caps at 1000 px.
+        anchor = getattr(self, '_settings_top_btn', None)
+        if anchor is not None and anchor.height > 1:
+            c.top = anchor.y - dp(55)
         pad, gap = dp(14), dp(9)
         inner_w  = c.width - pad * 2
         title_h  = dp(30)
@@ -1106,6 +1118,7 @@ class GameScreen(Screen):
             desc.bind(width=lambda inst, val: setattr(inst, 'text_size', (val, None)))
             row.add_widget(Widget(size_hint=(1, None), height=dp(8)))
             row.add_widget(desc)
+        row.set_active = _activate
         return row
 
     def create_sliders(self):
@@ -1169,12 +1182,13 @@ class GameScreen(Screen):
         )
         epsilon_box = SliderBox(
             "Epsilon (Potential Depth used for Lennard-Jones force between Molecules) (E increase, D decrease)",
-            0, 100, 50, 0.5, self.game_area.set_epsilon,
+            0, 10, 1, 0.1, self.game_area.set_epsilon,
             info_text=(
                 "Best seen with Forces ON (bottom row). "
+                "1.0 is the calibrated default used by every phase preset. "
                 "High epsilon = strong attraction = molecules clump into liquid/solid groups — cyan lines brighten and pull them together. "
                 "Low epsilon = weak attraction = molecules drift apart like a gas. "
-                "This one slider shows the difference between solid, liquid and gas phases!"
+                "Large jumps can add substantial potential energy, so adjust it gradually."
             ),
             info_callback=_show_slider_info,
         )
@@ -1234,7 +1248,7 @@ class GameScreen(Screen):
         self.game_area.speed_slider   = speed_box.slider
         self.game_area.size_slider    = size_box.slider
 
-        self.verlet_button = self.create_hover_button("Verlet-Off", self.toggle_verlet_mode)
+        self.verlet_button = self.create_hover_button("Verlet-On", self.toggle_verlet_mode)
         self.verlet_button.opacity = 0
         self.bonds_button = HoverItem(
             size_hint=(0, 0), opacity=0,
@@ -1295,6 +1309,11 @@ class GameScreen(Screen):
         vecs_row   = self._make_drawer_toggle("Vectors", _vecs_on,   _vecs_off)
         verlet_row = self._make_drawer_toggle("Prediction Method", _verlet_off, _verlet_on, "Euler", "Verlet",
                                                desc_text="Verlet looks at where the molecule was last to correct the next move. This cancels most errors, keeping energy stable for much longer.")
+        lines_row.set_active(self.game_area.bonds_visible)
+        vecs_row.set_active(self.game_area.forces_visible)
+        # The left button is Euler and the right button is Verlet.
+        verlet_row.set_active(not self.game_area.use_verlet)
+        self._prediction_toggle = verlet_row
 
         back_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=dp(60))
         back_row.add_widget(Widget(size_hint_x=1))
@@ -1574,7 +1593,8 @@ class GameScreen(Screen):
                 inst.color = self._BTN_ACTIVE
                 self._active_preset_btn = inst
                 self.generated_selected_preset(name)
-                _show_phase_popup(name)
+                # Phase explanation popups are temporarily disabled.
+                # _show_phase_popup(name)
             _pb.bind(on_press=_on_preset_press)
             middle.add_widget(_pb)
 
@@ -1735,8 +1755,10 @@ class GameScreen(Screen):
             btn.hoverSource   = f"Graphics/{stem}_Highlighted.png"
             btn.defaultSource = f"Graphics/{stem}.png"
             btn.source = btn.hoverSource if btn.use else btn.defaultSource
-        _restore(self.verlet_button, "Verlet-Off")
+        _restore(self.verlet_button, "Verlet-On")
         _restore(self.bonds_button,  "Vectors")
+        if hasattr(self, '_prediction_toggle'):
+            self._prediction_toggle.set_active(False)
 
         from kivy.animation import Animation as _Anim
         self.lj_lines_btn.text = 'LINES  ON'
@@ -1961,14 +1983,13 @@ class GameScreen(Screen):
             
     def toggle_verlet_mode(self):
         """Toggle between Verlet and non-Verlet updates."""
-        if self.game_area.use_verlet:
-            self.verlet_button.hoverSource="Graphics/Verlet-On_Highlighted.png"
-            self.verlet_button.defaultSource="Graphics/Verlet-On.png"
-        else:
-            self.verlet_button.hoverSource="Graphics/Verlet-Off_Highlighted.png"
-            self.verlet_button.defaultSource="Graphics/Verlet-Off.png"
-        self.verlet_button.source = self.verlet_button.hoverSource if self.verlet_button.use else self.verlet_button.defaultSource
         self.game_area.toggle_update_mode()
+        stem = "Verlet-On" if self.game_area.use_verlet else "Verlet-Off"
+        self.verlet_button.hoverSource=f"Graphics/{stem}_Highlighted.png"
+        self.verlet_button.defaultSource=f"Graphics/{stem}.png"
+        self.verlet_button.source = self.verlet_button.hoverSource if self.verlet_button.use else self.verlet_button.defaultSource
+        if hasattr(self, '_prediction_toggle'):
+            self._prediction_toggle.set_active(not self.game_area.use_verlet)
 
     def clear_game_area(self):
         """Clear the game area of all molecules and bonds."""
@@ -1986,8 +2007,8 @@ class GameScreen(Screen):
         C_DETAIL  = (0.76, 0.81, 0.90, 0.92)
 
         panel = FloatLayout(
-            size_hint=(0.42, 0.26),
-            pos_hint={'center_x': 0.5, 'y': 0.045},
+            size_hint=(0.42, 0.15),
+            pos_hint={'center_x': 0.5, 'y': 0.030},
             opacity=0,
         )
         with panel.canvas.before:
@@ -2014,9 +2035,9 @@ class GameScreen(Screen):
             """Colour key, drawn as a glyph so it is centred by the same layout
             pass as the label next to it."""
             lbl = Label(text='\u2014', bold=True,
-                        font_size=_UI_H * 0.058,
+                        font_size=_UI_H * 0.045,
                         color=(*colour, 1),
-                        size_hint_x=None, width=dp(64))
+                        size_hint_x=None, width=dp(52))
             return lbl
 
         rows = BoxLayout(orientation='vertical',
@@ -2025,7 +2046,7 @@ class GameScreen(Screen):
                          spacing=dp(3))
 
         title = Label(text='F O R C E S', bold=True,
-                      font_size=_UI_H * 0.038, color=C_TITLE,
+                      font_size=_UI_H * 0.032, color=C_TITLE,
                       size_hint_y=0.20, halign='center', valign='middle')
         title.bind(size=title.setter('text_size'))
         rows.add_widget(title)
@@ -2037,10 +2058,10 @@ class GameScreen(Screen):
             row = BoxLayout(orientation='horizontal', size_hint_y=0.40,
                             spacing=dp(10))
             row.add_widget(_swatch(colour))
-            lbl = Label(text=name, bold=True, font_size=_UI_H * 0.046,
+            lbl = Label(text=name, bold=True, font_size=_UI_H * 0.040,
                         color=(*colour, 1), size_hint_x=0.44,
                         halign='left', valign='middle')
-            det = Label(text=detail, bold=True, font_size=_UI_H * 0.035,
+            det = Label(text=detail, bold=True, font_size=_UI_H * 0.032,
                         color=C_DETAIL, size_hint_x=0.58,
                         halign='left', valign='middle')
             for l in (lbl, det):
@@ -2052,9 +2073,9 @@ class GameScreen(Screen):
 
         close = Button(
             text='\u00d7', bold=True,
-            font_size=_UI_H * 0.060,
+            font_size=_UI_H * 0.050,
             size_hint=(None, None),
-            width=dp(58), height=dp(58),
+            width=dp(44), height=dp(44),
             pos_hint={'right': 0.99, 'top': 0.98},
             background_normal='', background_down='',
             background_color=(0, 0, 0, 0),
@@ -2097,7 +2118,7 @@ class GameScreen(Screen):
 
         def _hdr(text, color, pos_hint):
             l = Label(text=text, font_size=fs_hdr, bold=True, color=color,
-                      size_hint=(0.24, 0.055), pos_hint=pos_hint,
+                      size_hint=(0.30, 0.055), pos_hint=pos_hint,
                       halign='left', valign='bottom')
             l.bind(size=l.setter('text_size'))
             return l
@@ -2109,19 +2130,19 @@ class GameScreen(Screen):
             l.bind(size=l.setter('text_size'))
             return l
 
-        root.add_widget(_hdr("Total Energy", (1.0, 0.75, 0.3, 0.90),
+        root.add_widget(_hdr("Total Energy  E* = E/E0", (1.0, 0.75, 0.3, 0.90),
                              {'x': 0.02, 'top': 0.750}))
         self.game_area.total_energy_label = _val(
             "0", (1.0, 0.6, 0.2, 1), {'x': 0.02, 'top': 0.695})
         root.add_widget(self.game_area.total_energy_label)
 
-        root.add_widget(_hdr("Pressure", (0.55, 0.9, 1.0, 0.90),
+        root.add_widget(_hdr("Pressure  P* = P L0^2/E0", (0.55, 0.9, 1.0, 0.90),
                              {'x': 0.02, 'top': 0.615}))
         self.game_area.pressure_label = _val(
             "0", (0.35, 0.85, 1.0, 1), {'x': 0.02, 'top': 0.560})
         root.add_widget(self.game_area.pressure_label)
 
-        root.add_widget(_hdr("Temperature", (1.0, 0.55, 0.75, 0.90),
+        root.add_widget(_hdr("Temperature  T* = kBT/E0", (1.0, 0.55, 0.75, 0.90),
                              {'x': 0.02, 'top': 0.480}))
         self.game_area.temperature_label = _val(
             "0", (1.0, 0.32, 0.55, 1), {'x': 0.02, 'top': 0.425})

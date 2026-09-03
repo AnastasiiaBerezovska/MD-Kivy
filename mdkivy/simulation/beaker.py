@@ -8,12 +8,6 @@ from kivy.vector import Vector
 SIDE = 'side'
 TOP  = 'top'
 
-PHASE = {
-    'solid':  (5.0, 1.0, True),
-    'liquid': (2.0, 1.0, False),
-    'gas':    (0.3, 1.5, False),
-}
-
 _FLOOR_L, _FLOOR_R = 0.10, 0.90
 _NECK_L,  _NECK_R  = 0.28, 0.72
 _SHOULDER          = 0.60
@@ -23,8 +17,10 @@ class Beaker:
 
     rect_prop = (0.755, 0.050, 0.230, 0.42)
     wall_prop = 0.055
-    restitution = 0.90
-    gravity_strength = 420.0
+    restitution = 1.0
+    # A gentle visual settling force. The previous value (420 px/s²) heated a
+    # nominal solid above the gas preset when it fell into the flask.
+    gravity_strength = 10.0
 
     def __init__(self, layout):
         self.layout = layout
@@ -72,6 +68,19 @@ class Beaker:
         x, y, w, h = self.outer
         r = min(w, h) * 0.46
         return (x + w * 0.5, y + h * 0.5, r)
+
+    @property
+    def interior_area(self):
+        """Approximate 2-D container area used by the pressure calculation."""
+        if self.orientation == TOP:
+            _, _, radius = self.top_circle
+            return math.pi * radius * radius
+
+        points = self.outline
+        twice_area = 0.0
+        for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]):
+            twice_area += x1 * y2 - x2 * y1
+        return abs(twice_area) * 0.5
 
     def contains(self, cx, cy):
         """Is this point inside the glass?"""
@@ -171,7 +180,7 @@ class Beaker:
         return True
 
 
-    def _sample(self, n):
+    def _sample(self, n, min_sep=0.0):
         """Random points well inside the glass."""
         x, y, w, h = self.outer
         # leave room for the glass wall
@@ -182,34 +191,34 @@ class Beaker:
                 break
             px, py = uniform(x + pad, x + w - pad), uniform(y + pad, y + h - pad)
             if (self.contains(px, py) and self.contains(px - pad, py)
-                    and self.contains(px + pad, py) and self.contains(px, py - pad)):
+                    and self.contains(px + pad, py) and self.contains(px, py - pad)
+                    and all((px - ox) ** 2 + (py - oy) ** 2 >= min_sep ** 2
+                            for ox, oy in out)):
                 out.append((px, py))
         return out
 
     def fill(self, phase):
         """Fill the glass with a solid, liquid or gas.
 
-        The contents get the same interaction parameters the whole-area presets
-        use, but carried on the molecules themselves rather than set globally -
-        so a solid in the flask behaves exactly like a solid outside it, while
-        the open sandbox keeps whatever epsilon and sigma it already had.
-
-        Molecules already outside are kept, so the two can be compared.
+        Selecting a phase is a true preset reset: old molecules are removed so
+        the measurements describe only the selected material and phase.
         """
         layout = self.layout
         off = 50
 
-        # leave outside molecules alone
-        keep = [m for m in layout.molecules if not self.contains(*m.pos)]
-        for m in layout.molecules:
-            if m not in keep:
-                layout.remove_widget(m)
-        layout.molecules = keep
+        layout.clear_molecules()
 
-        eps, sig, thermo = PHASE[phase]
+        eps = layout.SUBSTANCE_EPSILON
+        sig = layout.SUBSTANCE_SIGMA
+        target_temperature = {
+            'solid': layout.SOLID_TEMPERATURE,
+            'liquid': layout.LIQUID_TEMPERATURE,
+            'gas': layout.GAS_TEMPERATURE,
+        }[phase]
+        new_molecules = []
 
         if phase == 'solid':
-            spacing = max((2 ** (1 / 6)) * layout.sigma * layout.scale,
+            spacing = max((2 ** (1 / 6)) * sig * layout.scale,
                           2.0 * layout.molecule_radius)
             x, y, w, h = self.outer
             pad = layout.molecule_radius + self.wall
@@ -218,23 +227,31 @@ class Beaker:
             while cy <= y + h - pad:
                 cx = x + pad + (spacing / 2 if row % 2 else 0)
                 while cx <= x + w - pad:
-                    if self.contains(cx, cy) and self.contains(cx, cy - pad):
+                    # The whole molecule, not just its centre, must start clear
+                    # of the sloped glass. Otherwise the first wall-resolution
+                    # pass pushes edge particles into their neighbours and the
+                    # LJ r^-12 term produces an enormous energy/pressure spike.
+                    if (self.contains(cx, cy)
+                            and self.contains(cx - pad, cy)
+                            and self.contains(cx + pad, cy)
+                            and self.contains(cx, cy - pad)):
                         layout.create_molecule(cx + off, cy + off, 0, 0,
-                                               eps=eps, sig=sig, thermo=thermo)
+                                               eps=eps, sig=sig, thermo=False)
+                        new_molecules.append(layout.molecules[-1])
                     cx += spacing
                 row += 1
                 cy = y + pad + row * dy
+            layout._set_phase_temperature(new_molecules, target_temperature)
             return
 
-        if phase == 'liquid':
-            count, speed = 14, 50
-        else:
-            count, speed = 7, 300
+        count = 14 if phase == 'liquid' else 7
+        min_sep = max(1.25 * sig * layout.scale, 2.1 * layout.molecule_radius)
 
-        for px, py in self._sample(count):
-            layout.create_molecule(px + off, py + off,
-                                   uniform(-speed, speed), uniform(-speed, speed),
-                                   eps=eps, sig=sig, thermo=thermo)
+        for px, py in self._sample(count, min_sep=min_sep):
+            layout.create_molecule(px + off, py + off, 0, 0,
+                                   eps=eps, sig=sig, thermo=False)
+            new_molecules.append(layout.molecules[-1])
+        layout._set_phase_temperature(new_molecules, target_temperature)
 
     def view_gravity(self):
         """Head-on view supplies its own pull; the gravity slider tops out at
