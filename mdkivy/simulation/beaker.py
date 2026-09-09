@@ -1,4 +1,4 @@
-"""Flask-shaped boundary for sandbox molecules."""
+"""Flask geometry for the synchronized simulation projection."""
 
 import math
 from random import uniform
@@ -18,9 +18,6 @@ class Beaker:
     rect_prop = (0.755, 0.050, 0.230, 0.42)
     wall_prop = 0.055
     restitution = 1.0
-    # A gentle visual settling force. The previous value (420 px/s²) heated a
-    # nominal solid above the gas preset when it fell into the flask.
-    gravity_strength = 10.0
 
     def __init__(self, layout):
         self.layout = layout
@@ -94,14 +91,20 @@ class Beaker:
         if not (y <= cy <= y + h):
             return False
         v = (cy - y) / h if h else 0.0
-        if v >= _SHOULDER:
-            lo, hi = _NECK_L, _NECK_R
-        else:
-            f = v / _SHOULDER if _SHOULDER else 0.0
-            lo = _FLOOR_L + (_NECK_L - _FLOOR_L) * f
-            hi = _FLOOR_R + (_NECK_R - _FLOOR_R) * f
+        lo, hi = self.profile_bounds(v)
         u = (cx - x) / w if w else 0.0
         return lo <= u <= hi
+
+    @staticmethod
+    def profile_bounds(v):
+        """Horizontal flask bounds in normalized coordinates at height ``v``."""
+        v = max(0.0, min(float(v), 1.0))
+        if v >= _SHOULDER:
+            return _NECK_L, _NECK_R
+        f = v / _SHOULDER if _SHOULDER else 0.0
+        lo = _FLOOR_L + (_NECK_L - _FLOOR_L) * f
+        hi = _FLOOR_R + (_NECK_R - _FLOOR_R) * f
+        return lo, hi
 
 
     def collide(self, mol):
@@ -198,64 +201,18 @@ class Beaker:
         return out
 
     def fill(self, phase):
-        """Fill the glass with a solid, liquid or gas.
+        """Select a phase on the main board and mirror it in the flask.
 
-        Selecting a phase is a true preset reset: old molecules are removed so
-        the measurements describe only the selected material and phase.
+        The beaker is a display projection, not a second physical system. This
+        compatibility entry point therefore delegates to the authoritative
+        whole-board preset instead of creating independently simulated atoms.
         """
-        layout = self.layout
-        off = 50
-
-        layout.clear_molecules()
-
-        eps = layout.SUBSTANCE_EPSILON
-        sig = layout.SUBSTANCE_SIGMA
-        target_temperature = {
-            'solid': layout.SOLID_TEMPERATURE,
-            'liquid': layout.LIQUID_TEMPERATURE,
-            'gas': layout.GAS_TEMPERATURE,
-        }[phase]
-        new_molecules = []
-
-        if phase == 'solid':
-            spacing = max((2 ** (1 / 6)) * sig * layout.scale,
-                          2.0 * layout.molecule_radius)
-            x, y, w, h = self.outer
-            pad = layout.molecule_radius + self.wall
-            dy = spacing * (3 ** 0.5) / 2.0
-            row, cy = 0, y + pad
-            while cy <= y + h - pad:
-                cx = x + pad + (spacing / 2 if row % 2 else 0)
-                while cx <= x + w - pad:
-                    # The whole molecule, not just its centre, must start clear
-                    # of the sloped glass. Otherwise the first wall-resolution
-                    # pass pushes edge particles into their neighbours and the
-                    # LJ r^-12 term produces an enormous energy/pressure spike.
-                    if (self.contains(cx, cy)
-                            and self.contains(cx - pad, cy)
-                            and self.contains(cx + pad, cy)
-                            and self.contains(cx, cy - pad)):
-                        layout.create_molecule(cx + off, cy + off, 0, 0,
-                                               eps=eps, sig=sig, thermo=False)
-                        new_molecules.append(layout.molecules[-1])
-                    cx += spacing
-                row += 1
-                cy = y + pad + row * dy
-            layout._set_phase_temperature(new_molecules, target_temperature)
-            return
-
-        count = 14 if phase == 'liquid' else 7
-        min_sep = max(1.25 * sig * layout.scale, 2.1 * layout.molecule_radius)
-
-        for px, py in self._sample(count, min_sep=min_sep):
-            layout.create_molecule(px + off, py + off, 0, 0,
-                                   eps=eps, sig=sig, thermo=False)
-            new_molecules.append(layout.molecules[-1])
-        layout._set_phase_temperature(new_molecules, target_temperature)
+        generator = getattr(self.layout, f'generate_{phase}', None)
+        if generator is None:
+            raise ValueError(f'Unknown phase: {phase}')
+        generator()
+        self.layout._update_beaker_projection()
 
     def view_gravity(self):
-        """Head-on view supplies its own pull; the gravity slider tops out at
-        10 px/s^2, far too gentle to settle molecules into a vessel."""
-        if self.active and self.orientation == SIDE:
-            return self.gravity_strength
+        """The projection never applies forces to the authoritative system."""
         return 0.0

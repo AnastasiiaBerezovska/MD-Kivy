@@ -161,18 +161,25 @@ class ThermodynamicsTests(unittest.TestCase):
         final_energy = self.layout._metric_raw['energy']
         self.assertAlmostEqual(final_energy, initial_energy, places=8)
 
-    def test_beaker_phase_replaces_old_state_without_energy_spike(self):
+    def test_beaker_phase_is_one_to_one_projection_without_energy_spike(self):
         self.layout.beaker.active = False
         self.layout.generate_gas()
         old_molecules = set(self.layout.molecules)
 
         self.layout.beaker.active = True
+        self.layout.draw_beaker()
         random.seed(7)
         self.layout.fill_beaker('solid')
         self.assertTrue(self.layout.molecules)
         self.assertTrue(old_molecules.isdisjoint(self.layout.molecules))
-        self.assertTrue(all(self.layout.beaker.contains(*molecule.pos)
+        self.assertEqual(len(self.layout._beaker_projection),
+                         len(self.layout.molecules))
+        self.assertTrue(any(not self.layout.beaker.contains(*molecule.pos)
                             for molecule in self.layout.molecules))
+        for molecule in self.layout.molecules:
+            x, y, radius = self.layout._beaker_projection_geometry(molecule)
+            self.assertTrue(self.layout.beaker.contains(x, y))
+            self.assertLess(radius, molecule.radius)
 
         self.layout.intermolecular_forces = True
         self.layout._forces_initialized = False
@@ -189,18 +196,42 @@ class ThermodynamicsTests(unittest.TestCase):
             abs(initial_energy), 1.0)
         self.assertLess(relative_drift, 0.02)
         self.assertLess(maximum_pressure, 25.0)
+        self.assertEqual(len(self.layout._beaker_projection),
+                         len(self.layout.molecules))
 
-    def test_beaker_pressure_uses_beaker_area(self):
+    def test_beaker_projection_does_not_change_thermodynamics(self):
         from mdkivy.simulation.beaker import TOP
+
+        self.layout.beaker.active = False
+        self.layout.create_molecule(800, 600, 50, 0)
+        metrics_without_projection = self.layout._thermodynamic_metrics()
 
         self.layout.beaker.active = True
         self.layout.set_beaker_orientation(TOP)
-        cx, cy, _ = self.layout.beaker.top_circle
-        self.layout.create_molecule(cx + 50, cy + 50, 50, 0)
-        _, temperature, pressure = self.layout._thermodynamic_metrics()
+        metrics_with_projection = self.layout._thermodynamic_metrics()
 
-        area = self.layout.beaker.interior_area / game_layout.LENGTH_UNIT ** 2
-        self.assertAlmostEqual(pressure, temperature / area, places=10)
+        self.assertEqual(metrics_with_projection, metrics_without_projection)
+        self.assertEqual(len(self.layout._beaker_projection), 1)
+
+    def test_beaker_projection_tracks_molecule_motion_without_duplication(self):
+        self.layout.beaker.active = True
+        self.layout.draw_beaker()
+        self.layout.create_molecule(700, 500, 50, 25)
+        molecule = self.layout.molecules[0]
+        self.layout._update_beaker_projection()
+
+        cached = self.layout._beaker_projection[molecule]
+        core = cached[5]
+        old_core_id = id(core)
+        old_position = tuple(core.pos)
+        molecule.pos = (1000, 750)
+        self.layout._update_beaker_projection()
+
+        self.assertEqual(len(self.layout.molecules), 1)
+        self.assertEqual(len(self.layout._beaker_projection), 1)
+        self.assertEqual(id(self.layout._beaker_projection[molecule][5]),
+                         old_core_id)
+        self.assertNotEqual(tuple(core.pos), old_position)
 
     def test_verlet_conserves_phase_energy(self):
         self.layout.use_verlet = True
@@ -224,17 +255,26 @@ class ThermodynamicsTests(unittest.TestCase):
 
     def test_smoothing_reduces_readout_jitter(self):
         raw = []
-        shown = []
+        shown_temperature = []
+        shown_pressure = []
         for i in range(180):
             value = 10.0 + math.sin(i * 1.7)
             raw.append(value)
-            shown.append(self.layout._smooth_metrics({
+            displayed = self.layout._smooth_metrics({
                 'energy': value,
                 'temperature': value,
                 'pressure': value,
-            }, 1 / 30.0)['temperature'])
-        self.assertLess(max(shown[-60:]) - min(shown[-60:]),
-                        (max(raw[-60:]) - min(raw[-60:])) * 0.2)
+            }, 1 / 30.0)
+            shown_temperature.append(displayed['temperature'])
+            shown_pressure.append(displayed['pressure'])
+
+        raw_range = max(raw[-60:]) - min(raw[-60:])
+        self.assertLess(
+            max(shown_temperature[-60:]) - min(shown_temperature[-60:]),
+            raw_range * 0.05)
+        self.assertLess(
+            max(shown_pressure[-60:]) - min(shown_pressure[-60:]),
+            raw_range * 0.05)
 
     def test_touch_spawn_avoids_repulsive_core_and_matches_temperature(self):
         random.seed(7)

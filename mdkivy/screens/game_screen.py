@@ -572,17 +572,15 @@ class GameScreen(Screen):
         pass
 
     def generated_selected_preset(self, preset):
-        """Fill with the chosen phase - into the flask when it is on screen,
-        otherwise across the whole play area. The empty sandbox starts with
-        forces off, but a material phase needs intermolecular forces to exist,
-        so choosing Solid, Liquid, or Gas enables them. The user can turn them
-        off afterward to see the phase lose cohesion.
+        """Generate the phase on the board; the flask mirrors it automatically.
+
+        The empty sandbox starts with forces off, but a material phase needs
+        intermolecular forces to exist, so choosing Solid, Liquid, or Gas
+        enables them. The user can turn them off afterward to see the phase
+        lose cohesion in both synchronized views.
         """
-        phase = preset.lower()
         self._forces_on()
-        if self.game_area.beaker.active:
-            self.game_area.fill_beaker(phase)
-        elif preset == "Solid":
+        if preset == "Solid":
             self.game_area.generate_solid()
         elif preset == "Liquid":
             self.game_area.generate_liquid()
@@ -1636,7 +1634,7 @@ class GameScreen(Screen):
         return bar
 
     def _toggle_beaker(self):
-        """Show or hide the flask, and reveal its view switch with it."""
+        """Show or hide the live projection and its view switch."""
         active = self.game_area.toggle_beaker()
         self._beaker_btn.color = self._BTN_ACTIVE if active else self._BTN_IDLE
         self._beaker_view_btn.opacity  = 1 if active else 0
@@ -1645,7 +1643,7 @@ class GameScreen(Screen):
             self._sync_beaker_view_btn()
 
     def _toggle_beaker_view(self):
-        """Head-on (gravity, open mouth) vs bird's-eye (no gravity, closed)."""
+        """Switch the same live projection between side and bird's-eye views."""
         from mdkivy.simulation.beaker import SIDE, TOP
         nxt = TOP if self.game_area.beaker.orientation == SIDE else SIDE
         self.game_area.set_beaker_orientation(nxt)
@@ -2136,13 +2134,13 @@ class GameScreen(Screen):
             "0", (1.0, 0.6, 0.2, 1), {'x': 0.02, 'top': 0.695})
         root.add_widget(self.game_area.total_energy_label)
 
-        root.add_widget(_hdr("Pressure  P* = P L0^2/E0", (0.55, 0.9, 1.0, 0.90),
+        root.add_widget(_hdr("Pressure (avg)  P* = P L0^2/E0", (0.55, 0.9, 1.0, 0.90),
                              {'x': 0.02, 'top': 0.615}))
         self.game_area.pressure_label = _val(
             "0", (0.35, 0.85, 1.0, 1), {'x': 0.02, 'top': 0.560})
         root.add_widget(self.game_area.pressure_label)
 
-        root.add_widget(_hdr("Temperature  T* = kBT/E0", (1.0, 0.55, 0.75, 0.90),
+        root.add_widget(_hdr("Temperature (avg)  T* = kBT/E0", (1.0, 0.55, 0.75, 0.90),
                              {'x': 0.02, 'top': 0.480}))
         self.game_area.temperature_label = _val(
             "0", (1.0, 0.32, 0.55, 1), {'x': 0.02, 'top': 0.425})
