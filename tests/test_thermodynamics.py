@@ -89,7 +89,10 @@ class ThermodynamicsTests(unittest.TestCase):
             maximum_abs_energy = max(
                 maximum_abs_energy, abs(self.layout._metric_raw['energy']))
 
-        self.assertLess(maximum_temperature, 2.0)
+        # Taps add heat by design (SPAWN_HEAT_STEP), so fifteen taps on an
+        # empty board legitimately reach T* ~ 4. The regression this guards
+        # against sent T* above 16; 8 still catches it.
+        self.assertLess(maximum_temperature, 8.0)
         self.assertLess(maximum_abs_energy, 100.0)
 
     def test_force_line_endpoints_follow_molecules_without_rebuild(self):
@@ -276,7 +279,7 @@ class ThermodynamicsTests(unittest.TestCase):
             max(shown_pressure[-60:]) - min(shown_pressure[-60:]),
             raw_range * 0.05)
 
-    def test_touch_spawn_avoids_repulsive_core_and_matches_temperature(self):
+    def test_touch_spawn_avoids_repulsive_core_and_adds_heat(self):
         random.seed(7)
         self.layout.generate_solid()
         self.layout.intermolecular_forces = True
@@ -303,7 +306,11 @@ class ThermodynamicsTests(unittest.TestCase):
 
         self.layout._refresh_forces()
         final_energy, final_temperature, _ = self.layout._thermodynamic_metrics()
-        self.assertAlmostEqual(final_temperature, initial_temperature, places=10)
+        # A tap adds a molecule hotter than the sample, so temperature rises.
+        # Total energy may go either way: the newcomer brings kinetic energy
+        # but also settles into an attractive lattice gap, which lowers the
+        # potential energy. What must never happen is a repulsive-core spike.
+        self.assertGreater(final_temperature, initial_temperature)
         self.assertLess(abs(final_energy - initial_energy), 10.0)
 
         inserted_energy = final_energy

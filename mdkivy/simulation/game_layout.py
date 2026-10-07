@@ -45,6 +45,50 @@ import numpy as np
 # against -1 at 0.004 and 0 at 0.002. Each frame is therefore split into
 # several equal sub-steps, which keeps the simulation running at the same
 # apparent speed while integrating stably.
+# Flask miniatures are the board scaled by roughly 0.15, which leaves each dot
+# about 5 px across - too small to read. They are a display projection only,
+# so enlarging them changes nothing in the physics.
+BEAKER_DOT_BOOST = 2.2
+
+# Temperature and pressure readouts change when the user changes something and
+# hold still otherwise. In a system this small both genuinely fluctuate, so no
+# averaging window is both quick to follow a change and steady at rest; instead
+# the readout tracks for METRIC_SETTLE_S seconds after any user action, then
+# locks. The escape (relative, absolute floor) lets a large change with no user
+# action - e.g. a gas condensing on its own - still get through.
+METRIC_SETTLE_S = 4.0
+
+# A tap adds a molecule hotter than the sample, so the three readouts all
+# respond the way the gas laws say they should: energy up (energy was added),
+# temperature up (the newcomer is hotter than average) and pressure up (more,
+# faster molecules hitting the walls). Spawn temperature is
+# max(SPAWN_MIN_TEMPERATURE, current temperature + SPAWN_HEAT_STEP). A fixed
+# step, not a multiple: a multiple compounds, so temperature ran away with
+# repeated taps (4.8 -> 10.7 over 200 molecules). With a step each tap raises
+# the average by roughly SPAWN_HEAT_STEP / N - always visible, never runaway.
+SPAWN_HEAT_STEP = 1.0
+SPAWN_MIN_TEMPERATURE = 1.0
+
+# Reduced pressure in a box this size is ~0.01 per ten molecules - unreadable
+# for a student. Shown multiplied by this; the header says so.
+PRESSURE_DISPLAY_SCALE = 100.0
+
+# Student-facing scales. The physics stays in reduced Lennard-Jones units;
+# only the readouts are converted, so solid < liquid < gas reads at a glance.
+#
+# Temperature in kelvin on the argon scale (eps/k_B = 119.8 K), the classic
+# substance this model describes: solid ~11 K, liquid ~77 K, gas ~360 K.
+KELVIN_PER_T_STAR = 119.8
+# Energy is shown relative to a frozen crystal, so a solid reads ~0 instead of
+# a large negative number. Zero of energy is a free choice; this only moves it.
+# Value: potential energy per molecule of the Solid preset's 7x7 hexagonal
+# block at rest (truncated-shifted LJ, 2.5 sigma cutoff), in units of epsilon.
+FROZEN_SOLID_ENERGY_PER_MOLECULE = -2.554
+METRIC_ESCAPE = {
+    'temperature': (0.30, 0.15),
+    'pressure':    (0.30, 0.03),
+}
+
 PHYSICS_SUBSTEP = 0.004
 MAX_SUBSTEPS    = 6
 
@@ -162,6 +206,8 @@ class GameLayout(Widget):
         # by _apply_lj_forces_numpy. Zero when forces are off.
         self._lj_potential = 0.0
         self._lj_virial = 0.0
+        self._collision_virial = 0.0
+        self._collision_impulse = 0.0
         self._forces_initialized = False
 
         # The microscopic values legitimately move from frame to frame. The UI
@@ -169,7 +215,10 @@ class GameLayout(Widget):
         # values remain available to monitoring and tests.
         self._metric_ema = {'energy': None, 'temperature': None, 'pressure': None}
         self._metric_raw = {'energy': 0.0, 'temperature': 0.0, 'pressure': 0.0}
-        self._metric_tau = {'energy': 0.45, 'temperature': 5.0, 'pressure': 5.0}
+        self._metric_tau = {'energy': 0.45, 'temperature': 2.0, 'pressure': 2.0}
+        self._metric_shown = {'temperature': None, 'pressure': None}
+        self._metric_unlock_until = 0.0
+        self._metric_signature = None
 
         self.thermostat_active = False
         self.thermostat_target_speed = 30.0
@@ -559,7 +608,9 @@ class GameLayout(Widget):
             current_temperature = max(self._thermodynamic_metrics()[1], 0.0)
         else:
             current_temperature = 0.5
-        speed = self._speed_for(current_temperature)
+        spawn_temperature = max(SPAWN_MIN_TEMPERATURE,
+                                current_temperature + SPAWN_HEAT_STEP)
+        speed = self._speed_for(spawn_temperature)
         angle = uniform(-math.pi, math.pi)
         vx = speed * math.cos(angle)
         vy = speed * math.sin(angle)
@@ -696,6 +747,7 @@ class GameLayout(Widget):
         self._reset_metric_display()
 
     def inject_energy(self, amount):
+        self._note_user_change()
         """Boost all molecule velocities randomly ==> called by slider or also EnergyInputWidget name if applicable."""
         boost = amount * 360
         for mol in self.molecules:
@@ -752,6 +804,8 @@ class GameLayout(Widget):
         else:
             self._lj_potential = 0.0
             self._lj_virial = 0.0
+            self._collision_virial = 0.0
+        self._collision_virial = 0.0
         self._forces_initialized = True
 
     def _thermodynamic_metrics(self):
@@ -783,7 +837,8 @@ class GameLayout(Widget):
         temperature = 2.0 * kinetic / (DOF * n * K_B)
         area_px = self.size[0] * self.size[1]
         area_reduced = max(area_px / (LENGTH_UNIT ** 2), 1e-9)
-        pressure = (n * K_B * temperature + self._lj_virial / DOF) / area_reduced
+        virial = self._lj_virial + getattr(self, '_collision_virial', 0.0)
+        pressure = (n * K_B * temperature + virial / DOF) / area_reduced
         total_energy = kinetic + self._lj_potential + gravitational
         return total_energy, temperature, pressure
 
@@ -802,7 +857,32 @@ class GameLayout(Widget):
             out[name] = smoothed
         return out
 
+    def _state_signature(self):
+        """Everything a user can change that should move T and P."""
+        return (len(self.molecules), self.intermolecular_forces,
+                round(self.epsilon, 4), round(self.sigma, 4),
+                round(self.gravity, 3), round(self.delta, 5),
+                self.thermostat_active, round(self.size_factor, 4),
+                self.use_verlet, self.beaker.active, self.beaker.orientation)
+
+    def _note_user_change(self):
+        """Unlock the T/P readouts so they follow the change, then settle."""
+        self._metric_unlock_until = time.monotonic() + METRIC_SETTLE_S
+
+    def _held_metric(self, name, value):
+        """Track while unlocked, otherwise hold - see METRIC_SETTLE_S."""
+        shown = self._metric_shown.get(name)
+        if shown is None or time.monotonic() < self._metric_unlock_until:
+            self._metric_shown[name] = value
+        else:
+            rel, floor = METRIC_ESCAPE[name]
+            if abs(value - shown) > max(rel * abs(shown), floor):
+                self._metric_shown[name] = value
+        return self._metric_shown[name]
+
     def _reset_metric_display(self):
+        self._metric_shown = {'temperature': None, 'pressure': None}
+        self._note_user_change()
         self._metric_ema = {'energy': None, 'temperature': None, 'pressure': None}
         self._metric_raw = {'energy': 0.0, 'temperature': 0.0, 'pressure': 0.0}
         for attr in ('total_energy_label', 'temperature_label', 'pressure_label'):
@@ -835,7 +915,17 @@ class GameLayout(Widget):
                     # correction here would silently delete potential energy.
                     pass
                 else:
+                    # Hard collisions exchange momentum between molecules,
+                    # which the pressure must include: crowded hard disks push
+                    # far harder than an ideal gas (Henderson). Record r.dp in
+                    # reduced units; update() turns it into a rate.
+                    rx = (mol1.pos[0] - mol2.pos[0]) / LENGTH_UNIT
+                    ry = (mol1.pos[1] - mol2.pos[1]) / LENGTH_UNIT
+                    v1x, v1y = mol1.total_velocity.x, mol1.total_velocity.y
                     mol1.resolve_collision(mol2)
+                    dpx = (mol1.total_velocity.x - v1x) / VELOCITY_UNIT
+                    dpy = (mol1.total_velocity.y - v1y) / VELOCITY_UNIT
+                    self._collision_impulse += rx * dpx + ry * dpy
                 mol1.update_color_based_on_speed()
                 mol2.update_color_based_on_speed()
 
@@ -940,8 +1030,12 @@ class GameLayout(Widget):
         steps  = max(1, min(MAX_SUBSTEPS,
                             int(math.ceil(self.delta / PHYSICS_SUBSTEP))))
         sub_dt = self.delta / steps
+        self._collision_impulse = 0.0
         for step in range(steps):
             self._integrate(sub_dt, first=(step == 0))
+        # sum over collisions of r.dp, per unit reduced time = <sum r.F>
+        frame_time = self.delta * VELOCITY_UNIT / LENGTH_UNIT
+        self._collision_virial = self._collision_impulse / max(frame_time, 1e-9)
 
         # Recalculate which interactions are visible and their colour only at
         # the old throttled cadence, but move existing line endpoints after
@@ -970,6 +1064,10 @@ class GameLayout(Widget):
             'pressure': pressure,
         }
         displayed = self._smooth_metrics(self._metric_raw, dt)
+        signature = self._state_signature()
+        if signature != self._metric_signature:
+            self._metric_signature = signature
+            self._note_user_change()
 
         if self.energy_bar is not None and self.molecules and self.use_verlet:
             total_spd = 0.0
@@ -981,14 +1079,25 @@ class GameLayout(Widget):
             self.energy_bar.feed(total_spd / len(self.molecules))
 
         if self.frame_counter % self.ui_update_every == 0:
-            energy_shown = 0.0 if abs(displayed['energy']) < 0.05 else displayed['energy']
+            # Bound states only exist with the forces on; with them off the
+            # energy is purely kinetic and already reads 0 for a frozen sample.
+            reference = (len(self.molecules) * FROZEN_SOLID_ENERGY_PER_MOLECULE
+                         * self.epsilon) if self.intermolecular_forces else 0.0
+            energy_shown = displayed['energy'] - reference
+            energy_shown = 0.0 if abs(energy_shown) < 0.05 else energy_shown
             self.total_energy_label.text = f"{energy_shown:,.1f}"
 
         if self.frame_counter % self.thermo_ui_update_every == 0:
-            temp_shown = 0.0 if abs(displayed['temperature']) < 0.005 else displayed['temperature']
-            pressure_shown = 0.0 if abs(displayed['pressure']) < 0.005 else displayed['pressure']
-            self.temperature_label.text = f"{temp_shown:,.2f}"
-            self.pressure_label.text = f"{pressure_shown:,.2f}"
+            temp_shown = self._held_metric('temperature', displayed['temperature'])
+            pressure_shown = self._held_metric('pressure', displayed['pressure'])
+            temp_shown = 0.0 if abs(temp_shown) < 0.005 else temp_shown
+            # A solid or liquid floating in an empty box barely touches the
+            # walls, so its pressure is ~0 and dips negative only by noise
+            # well below the display resolution. Never show it below zero.
+            pressure_shown = max(0.0, pressure_shown)
+            pressure_shown = 0.0 if pressure_shown < 0.0005 else pressure_shown
+            self.temperature_label.text = f"{temp_shown * KELVIN_PER_T_STAR:,.0f}"
+            self.pressure_label.text = f"{pressure_shown * PRESSURE_DISPLAY_SCALE:,.1f}"
 
         self.performance_monitor.update_simulation_metrics(
             molecule_count=len(self.molecules),
@@ -1666,8 +1775,9 @@ class GameLayout(Widget):
             base_span = math.sqrt(2.0) * usable_radius
             scale = min(base_span / max(self.width, 1.0),
                         base_span / max(self.height, 1.0))
-            particle_radius = max(2.0, min(radius * 0.045,
-                                           molecule.radius * scale))
+            particle_radius = max(radius * 0.035,
+                                  min(radius * 0.075,
+                                      molecule.radius * scale * BEAKER_DOT_BOOST))
             # Fit the complete particle disk, not only its centre, inside the
             # circular glass even when the board point lies in a corner.
             span = math.sqrt(2.0) * max(1.0,
@@ -1676,21 +1786,96 @@ class GameLayout(Widget):
                     cy + (v - 0.5) * span,
                     particle_radius)
 
+        xf = getattr(self, '_beaker_xf', None) or self._beaker_side_transform()
         x, y, width, height = b.outer
-        projected_v = 0.07 + 0.86 * v
-        lo_u, hi_u = b.profile_bounds(projected_v)
-        scale = min(width * 0.68 / max(self.width, 1.0),
-                    height * 0.86 / max(self.height, 1.0))
-        particle_radius = max(2.0, min(width * 0.020,
-                                       molecule.radius * scale))
-        edge_pad = b.wall * 0.42 + particle_radius
-        left = x + width * lo_u + edge_pad
-        right = x + width * hi_u - edge_pad
+        bx0, by0, bw, bh = xf['box']
+        t, s_iso, radius = xf['t'], xf['s_iso'], xf['radius']
+
+        # compact cluster: one scale both ways, centred, resting on the floor
+        iso_x = x + width * 0.5 + (molecule.pos[0] - (bx0 + bw * 0.5)) * s_iso
+        iso_y = y + height * 0.075 + radius + (molecule.pos[1] - by0) * s_iso
+        # spread sample: fill the flask
+        fv = (molecule.pos[1] - by0) / max(bh, 1.0)
+        fu = (molecule.pos[0] - bx0) / max(bw, 1.0)
+        fill_v = float(np.interp(max(0.0, min(1.0, fv)), xf['area_q'], xf['area_v']))
+        fill_y = y + height * fill_v
+        lo_u, hi_u = b.profile_bounds((fill_y - y) / max(height, 1.0))
+        pad = b.wall * 0.42 + radius
+        fl, fr = x + width * lo_u + pad, x + width * hi_u - pad
+        fill_x = fl + max(0.0, min(1.0, fu)) * max(fr - fl, 0.0)
+
+        px = iso_x + (fill_x - iso_x) * t
+        py = iso_y + (fill_y - iso_y) * t
+        # always keep the whole dot inside the glass
+        lo_u, hi_u = b.profile_bounds((py - y) / max(height, 1.0))
+        left, right = x + width * lo_u + pad, x + width * hi_u - pad
         if right < left:
             left = right = (left + right) * 0.5
-        return (left + u * (right - left),
-                y + height * projected_v,
-                particle_radius)
+        px = max(left, min(right, px))
+        py = max(y + height * 0.075 + radius, min(y + height * 0.93 - radius, py))
+        return px, py, radius
+
+    def _beaker_side_transform(self):
+        """Per-frame mapping from the sample to the flask (head-on view).
+
+        The flask used to squeeze the whole board in, about twice as hard
+        horizontally as vertically, which crushed a solid into overlapping
+        columns. It now maps the sample's own extent: a compact cluster (solid,
+        liquid) keeps its true shape at one uniform scale and rests on the
+        floor; a spread sample (gas) fills the flask. t blends the two so a
+        phase change slides rather than jumps. Dot size follows the same scale
+        so neighbours touch without overlapping.
+        """
+        b = self.beaker
+        x, y, width, height = b.outer
+        r = max(self.molecule_radius, 1.0)
+        if self.molecules:
+            xs = [m.pos[0] for m in self.molecules]
+            ys = [m.pos[1] for m in self.molecules]
+            box = (min(xs) - r, min(ys) - r,
+                   max(xs) - min(xs) + 2 * r, max(ys) - min(ys) + 2 * r)
+        else:
+            box = (self.x, self.y, self.width, self.height)
+
+        # smooth the outline so thermal motion does not make the view breathe
+        prev = getattr(self, '_beaker_box', None)
+        if prev is None:
+            self._beaker_box = box
+        else:
+            k = 0.2
+            self._beaker_box = tuple(p + k * (c - p) for p, c in zip(prev, box))
+        bx0, by0, bw, bh = self._beaker_box
+        bw, bh = max(bw, 2 * r), max(bh, 2 * r)
+
+        # 0 = compact cluster, 1 = fills the board
+        spread = min(bw / max(self.width, 1.0), bh / max(self.height, 1.0))
+        t = max(0.0, min(1.0, (spread - 0.45) / 0.30))
+
+        s_iso = min(width * 0.60 / bw, height * 0.50 / bh)
+        s_iso = min(s_iso, width * 0.050 / r)          # tiny clusters: cap dots
+        n = max(len(self.molecules), 1)
+        interior = width * height * 0.50
+        # gas dots sized well under the spacing per molecule, so they read as
+        # separate particles with room between them
+        r_fill = min(0.15 * math.sqrt(interior / n), width * 0.028)
+        r_iso = r * s_iso * 0.95
+        radius = r_iso + (r_fill - r_iso) * t
+        radius = max(3.0, min(width * 0.045, radius))
+
+        # Height -> cumulative glass area, so a gas spreads at even density.
+        # Mapped by height alone, the top of the sample was crammed into the
+        # narrow neck and clumped.
+        vs = np.linspace(0.075, 0.93, 48)
+        widths = np.array([max(b.profile_bounds(v)[1] - b.profile_bounds(v)[0],
+                               1e-6) for v in vs])
+        cum = np.concatenate(([0.0], np.cumsum(0.5 * (widths[1:] + widths[:-1])
+                                               * np.diff(vs))))
+        cum /= cum[-1]
+
+        self._beaker_xf = {'box': (bx0, by0, bw, bh), 't': t,
+                           's_iso': s_iso, 'radius': radius,
+                           'area_q': cum, 'area_v': vs}
+        return self._beaker_xf
 
     def _update_beaker_projection(self):
         """Synchronize one miniature graphic with every real molecule."""
@@ -1698,6 +1883,8 @@ class GameLayout(Widget):
                 or self.width < 10):
             self._clear_beaker_projection()
             return
+        if self.beaker.orientation != TOP:
+            self._beaker_side_transform()
 
         group = getattr(self, '_beaker_projection_group', None)
         if group is None:
@@ -1769,6 +1956,7 @@ class GameLayout(Widget):
         self.molecules.clear()
         self._lj_potential = 0.0
         self._lj_virial = 0.0
+        self._collision_virial = 0.0
         self._forces_initialized = False
         self._reset_metric_display()
         self._energy_history.clear()

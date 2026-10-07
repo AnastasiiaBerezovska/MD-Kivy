@@ -2128,19 +2128,19 @@ class GameScreen(Screen):
             l.bind(size=l.setter('text_size'))
             return l
 
-        root.add_widget(_hdr("Total Energy  E* = E/E0", (1.0, 0.75, 0.3, 0.90),
+        root.add_widget(_hdr("Total Energy  (0 = frozen solid)", (1.0, 0.75, 0.3, 0.90),
                              {'x': 0.02, 'top': 0.750}))
         self.game_area.total_energy_label = _val(
             "0", (1.0, 0.6, 0.2, 1), {'x': 0.02, 'top': 0.695})
         root.add_widget(self.game_area.total_energy_label)
 
-        root.add_widget(_hdr("Pressure (avg)  P* = P L0^2/E0", (0.55, 0.9, 1.0, 0.90),
+        root.add_widget(_hdr("Pressure (avg)  100 \u00d7 P*", (0.55, 0.9, 1.0, 0.90),
                              {'x': 0.02, 'top': 0.615}))
         self.game_area.pressure_label = _val(
             "0", (0.35, 0.85, 1.0, 1), {'x': 0.02, 'top': 0.560})
         root.add_widget(self.game_area.pressure_label)
 
-        root.add_widget(_hdr("Temperature (avg)  T* = kBT/E0", (1.0, 0.55, 0.75, 0.90),
+        root.add_widget(_hdr("Temperature (avg)  kelvin", (1.0, 0.55, 0.75, 0.90),
                              {'x': 0.02, 'top': 0.480}))
         self.game_area.temperature_label = _val(
             "0", (1.0, 0.32, 0.55, 1), {'x': 0.02, 'top': 0.425})

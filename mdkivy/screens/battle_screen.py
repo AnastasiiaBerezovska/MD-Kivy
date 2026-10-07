@@ -32,6 +32,8 @@ DRAW_DT         = 1/30.0
 HUD_DT          = 0.25
 SPAWN_COOLDOWN  = 0.12
 MAX_SPEED       = 550.0
+COOL_RATE       = 0.08   # fraction of speed lost per second while playing
+THERMAL_SCALE   = 3000.0 # total v^2 per kelvin on the scoreboard
 
 R_GAS       = 8.314
 AVOGADRO    = 6.022e23
@@ -639,6 +641,13 @@ class BattleScreen(Screen):
                 m['vx'] *= s
                 m['vy'] *= s
 
+        # heat leaks away, so a side has to keep tapping to stay hot
+        if self._state == 'playing':
+            damp = max(0.0, 1.0 - COOL_RATE * dt)
+            for m in mols:
+                m['vx'] *= damp
+                m['vy'] *= damp
+
         if self._flash_opacity > 0:
             self._flash_opacity = max(0.0, self._flash_opacity - 3.5 * dt)
 
@@ -679,11 +688,11 @@ class BattleScreen(Screen):
         return sum(m['vx']**2 + m['vy']**2 for m in side) / (len(side) * 2000.0)
 
     def _side_thermal(self, team):
-        """Temperature-like reading for one side: total KE / 1000.
-        Grows with both molecule count and speed, so spawning faster
-        heats the side toward TEMP_TARGET sooner."""
+        """Temperature-like reading for one side: total v^2 / THERMAL_SCALE.
+        Grows with both molecule count and speed, and drops as the side
+        cools, so a player has to keep tapping to reach TEMP_TARGET."""
         return sum(m['vx']**2 + m['vy']**2
-                   for m in self._molecules if m['team'] == team) / 2000.0
+                   for m in self._molecules if m['team'] == team) / THERMAL_SCALE
 
     def _pressure(self, team):
         """P = nRT/V - V fixed so P ∝ n*T."""
