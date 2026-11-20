@@ -89,11 +89,42 @@ class ThermodynamicsTests(unittest.TestCase):
             maximum_abs_energy = max(
                 maximum_abs_energy, abs(self.layout._metric_raw['energy']))
 
-        # Taps add heat by design (SPAWN_HEAT_STEP), so fifteen taps on an
-        # empty board legitimately reach T* ~ 4. The regression this guards
-        # against sent T* above 16; 8 still catches it.
+        # Slow sandbox particles must not trigger the old force
+        # toggle spike, which sent T* above 16.
         self.assertLess(maximum_temperature, 8.0)
         self.assertLess(maximum_abs_energy, 100.0)
+
+    def test_unselected_sandbox_drifts_slowly_without_gravity(self):
+        self.layout.reset_all_params()
+        random.seed(2)
+        touch = type('_Touch', (), {'pos': (800, 800)})()
+        self.assertTrue(self.layout.spawn_molecule_at_touch(touch))
+        molecule = self.layout.molecules[0]
+        position = tuple(molecule.pos)
+        velocity = tuple(molecule.total_velocity)
+        self.assertLess(molecule.total_velocity.length(), 40)
+        self.assertGreater(velocity[1], 0)
+        for _ in range(60):
+            self.layout.update(1 / 30)
+        for axis in (0, 1):
+            self.assertAlmostEqual(molecule.total_velocity[axis], velocity[axis])
+            self.assertAlmostEqual(molecule.pos[axis], position[axis] + velocity[axis])
+
+    def test_gas_moves_at_half_speed_without_changing_kinetic_temperature(self):
+        distances = []
+        for phase in (None, 'gas'):
+            self.layout.clear_molecules()
+            self.layout._projection_phase = phase
+            self.layout.set_gravity(0)
+            self.layout._last_molecule_radius = self.layout.molecule_radius
+            self.layout.create_molecule(800, 600, 60, 0)
+            molecule = self.layout.molecules[0]
+            before = molecule.pos[0]
+            temperature = self.layout._thermodynamic_metrics()[1]
+            self.layout.update(1 / 30)
+            distances.append(molecule.pos[0] - before)
+            self.assertAlmostEqual(self.layout._thermodynamic_metrics()[1], temperature)
+        self.assertAlmostEqual(distances[1], distances[0] * 0.5)
 
     def test_force_line_endpoints_follow_molecules_without_rebuild(self):
         self.layout.create_molecule(700, 500, 0, 0)
@@ -151,18 +182,30 @@ class ThermodynamicsTests(unittest.TestCase):
         self.assertAlmostEqual(temperature, 0.5, places=10)
         self.assertAlmostEqual(pressure, expected_pressure, places=10)
 
-    def test_gravitational_potential_keeps_total_energy_constant(self):
+    def test_gravity_pulls_only_beaker_particles(self):
         self.layout.intermolecular_forces = False
-        self.layout.set_gravity(10.0)
+        self.layout.set_gravity(0.0)
         self.layout.create_molecule(800, 850, 40, 0)
-        self.layout._refresh_forces()
+        molecule = self.layout.molecules[0]
+        arena_y = molecule.pos[1]
         initial_energy = self.layout._thermodynamic_metrics()[0]
+        self.layout.set_gravity(10.0)
+        self.layout._refresh_forces()
+        self.assertEqual(tuple(molecule.total_force), (0, 0))
+        self.assertEqual(self.layout._thermodynamic_metrics()[0], initial_energy)
+        self.layout.beaker.active = True
+        self.layout._update_beaker_projection()
+        sample = self.layout._beaker_dynamics
+        beaker_y = sample.positions[0, 1]
 
         for _ in range(120):
             self.layout.update(1 / 30.0)
 
         final_energy = self.layout._metric_raw['energy']
         self.assertAlmostEqual(final_energy, initial_energy, places=8)
+        self.assertAlmostEqual(molecule.pos[1], arena_y)
+        self.assertEqual(molecule.total_velocity.y, 0)
+        self.assertLess(sample.positions[0, 1], beaker_y - 1)
 
     def test_beaker_phase_is_one_to_one_projection_without_energy_spike(self):
         self.layout.beaker.active = False
@@ -216,7 +259,7 @@ class ThermodynamicsTests(unittest.TestCase):
         self.assertEqual(metrics_with_projection, metrics_without_projection)
         self.assertEqual(len(self.layout._beaker_projection), 1)
 
-    def test_beaker_projection_tracks_molecule_motion_without_duplication(self):
+    def test_beaker_motion_keeps_one_graphic_per_molecule(self):
         self.layout.beaker.active = True
         self.layout.draw_beaker()
         self.layout.create_molecule(700, 500, 50, 25)
@@ -229,6 +272,11 @@ class ThermodynamicsTests(unittest.TestCase):
         old_position = tuple(core.pos)
         molecule.pos = (1000, 750)
         self.layout._update_beaker_projection()
+
+        # Board motion must not teleport the flask's independently falling
+        # particle. Rendering while paused must not advance its physics either.
+        self.assertEqual(tuple(core.pos), old_position)
+        self.layout._update_beaker_projection(1 / 60.0)
 
         self.assertEqual(len(self.layout.molecules), 1)
         self.assertEqual(len(self.layout._beaker_projection), 1)

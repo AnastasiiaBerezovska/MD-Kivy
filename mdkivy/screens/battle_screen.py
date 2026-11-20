@@ -18,6 +18,13 @@ from kivy.animation import Animation
 from kivy.properties import NumericProperty
 from kivy.uix.image import Image
 from mdkivy.paths import FONT_IMPACT, TAP_ICON, STOMP_ICON
+from mdkivy.typography import (
+    BACK_FONT_FRACTION,
+    CONTROL_FONT_FRACTION,
+    READOUT_LABEL_FONT_FRACTION,
+    READOUT_VALUE_FONT_FRACTION,
+    scaled_font_size,
+)
 
 _FONT   = FONT_IMPACT
 
@@ -112,7 +119,7 @@ class BattleScreen(Screen):
 
     @staticmethod
     def _apply_font(widget, frac, outline):
-        widget.font_size = max(9.0, Window.height * frac)
+        widget.font_size = scaled_font_size(Window.height, frac)
         if outline:
             widget.outline_width = max(1, int(Window.height * outline))
 
@@ -211,10 +218,12 @@ class BattleScreen(Screen):
         box = BoxLayout(orientation='vertical', size_hint_x=width)
         nm = self._scale_font(
             Label(text=name, bold=True, color=(*colour, 1),
-                  size_hint_y=0.42, halign='center', valign='bottom'), 0.015)
+                  size_hint_y=0.42, halign='center', valign='bottom'),
+            READOUT_LABEL_FONT_FRACTION)
         val = self._scale_font(
             Label(text='0', bold=True, markup=True, color=(*colour, 1),
-                  size_hint_y=0.58, halign='center', valign='top'), 0.028)
+                  size_hint_y=0.58, halign='center', valign='top'),
+            READOUT_VALUE_FONT_FRACTION)
         for lbl in (nm, val):
             lbl.bind(size=lbl.setter('text_size'))
             box.add_widget(lbl)
@@ -280,7 +289,7 @@ class BattleScreen(Screen):
         def _sync(*_):
             _bg.pos = btn.pos; _bg.size = btn.size
             _bd.rounded_rectangle = (*btn.pos, *btn.size, 6)
-        self._scale_font(btn, 0.016)
+        self._scale_font(btn, BACK_FONT_FRACTION)
         btn.bind(pos=_sync, size=_sync, on_press=lambda *_: self._go_back())
         self._root.add_widget(btn)
 
@@ -335,7 +344,7 @@ class BattleScreen(Screen):
                             size_hint=(text_w, 0.11),
                             pos_hint={'x': text_x + dx, 'center_y': cy},
                             halign='left', valign='middle')
-                self._scale_font(lbl, 0.025)
+                self._scale_font(lbl, CONTROL_FONT_FRACTION)
                 lbl.bind(size=lbl.setter('text_size'))
                 self._intro.add_widget(lbl)
         self._root.add_widget(self._intro)

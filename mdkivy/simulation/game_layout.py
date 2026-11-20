@@ -2,12 +2,13 @@ from kivy.uix.widget import Widget
 from kivy.uix.label import Label
 from mdkivy.inputs.dual_makey import DualMakeyInput
 from kivy.clock import Clock
-from kivy.graphics import Color, Rectangle, Line, Quad, Ellipse
+from kivy.graphics import Color, Rectangle, Line, Quad, Ellipse, Mesh
 from kivy.graphics.instructions import InstructionGroup
 from kivy.properties import NumericProperty, BooleanProperty
 from kivy.vector import Vector
 from mdkivy.simulation.molecule import Molecule
 from mdkivy.simulation.beaker import Beaker, SIDE, TOP
+from mdkivy.simulation.beaker_dynamics import BeakerDynamics
 from kivy.core.window import Window
 from kivy.metrics import dp
 from random import uniform
@@ -45,11 +46,6 @@ import numpy as np
 # against -1 at 0.004 and 0 at 0.002. Each frame is therefore split into
 # several equal sub-steps, which keeps the simulation running at the same
 # apparent speed while integrating stably.
-# Flask miniatures are the board scaled by roughly 0.15, which leaves each dot
-# about 5 px across - too small to read. They are a display projection only,
-# so enlarging them changes nothing in the physics.
-BEAKER_DOT_BOOST = 2.2
-
 # Temperature and pressure readouts change when the user changes something and
 # hold still otherwise. In a system this small both genuinely fluctuate, so no
 # averaging window is both quick to follow a change and steady at rest; instead
@@ -58,8 +54,8 @@ BEAKER_DOT_BOOST = 2.2
 # action - e.g. a gas condensing on its own - still get through.
 METRIC_SETTLE_S = 4.0
 
-# A tap adds a molecule hotter than the sample, so the three readouts all
-# respond the way the gas laws say they should: energy up (energy was added),
+# After selecting a phase, a tap adds a molecule hotter than the sample, so
+# the readouts respond to added heat: energy up (energy was added),
 # temperature up (the newcomer is hotter than average) and pressure up (more,
 # faster molecules hitting the walls). Spawn temperature is
 # max(SPAWN_MIN_TEMPERATURE, current temperature + SPAWN_HEAT_STEP). A fixed
@@ -68,6 +64,9 @@ METRIC_SETTLE_S = 4.0
 # the average by roughly SPAWN_HEAT_STEP / N - always visible, never runaway.
 SPAWN_HEAT_STEP = 1.0
 SPAWN_MIN_TEMPERATURE = 1.0
+SANDBOX_TEMPERATURE = 0.2
+DEFAULT_BEAKER_GRAVITY = 8.0
+GAS_PLAYBACK_SPEED = 0.5
 
 # Reduced pressure in a box this size is ~0.01 per ten molecules - unreadable
 # for a student. Shown multiplied by this; the header says so.
@@ -130,17 +129,25 @@ class GameLayout(Widget):
             self.rect = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self.update_rect, size=self.update_rect)
 
-        # The beaker is a live inset, not a second physical container. Layer
-        # its dark interior, miniature particles, and glass above the main
-        # molecule widgets so full-size particles cannot obscure the inset.
+        # Layer the flask's sample above the board. It has its own gravity and
+        # wall collisions, with one particle per main-board molecule and a heat
+        # bath at the board's temperature.
         self._beaker_back_group = InstructionGroup()
+        self._beaker_liquid_group = InstructionGroup()
+        self._beaker_bond_group = InstructionGroup()
         self._beaker_projection_group = InstructionGroup()
         self._beaker_group = InstructionGroup()
         self.canvas.after.add(self._beaker_back_group)
+        self.canvas.after.add(self._beaker_liquid_group)
+        self.canvas.after.add(self._beaker_bond_group)
         self.canvas.after.add(self._beaker_projection_group)
         self.canvas.after.add(self._beaker_group)
         self.beaker = Beaker(self)
+        self._beaker_dynamics = BeakerDynamics(self.beaker)
         self._beaker_projection = {}
+        self._beaker_bond_lines = {}
+        self._beaker_liquid_mesh = None
+        self._beaker_liquid_surface = None
         self._projection_phase = None
 
         self._lj_viz_group = InstructionGroup()
@@ -228,7 +235,7 @@ class GameLayout(Widget):
         self.old_size = self.size[:]
         self.pos_in_between = self.pos[:]
         self.size_in_between = self.size[:]
-        self.gravity = 0
+        self.gravity = DEFAULT_BEAKER_GRAVITY
         self.makey_left_count  = 0
         self.makey_right_count = 0
         self.delta = 1 / 60.0
@@ -416,7 +423,7 @@ class GameLayout(Widget):
         Animation(color=(0, 1, 1, 0), duration=0.7).start(lbl)
 
     def adjust_gravity(self, change):
-        """change gravity value and update the slider"""
+        """Change beaker gravity and update the slider."""
         self.gravity = max(0, min(self.gravity + change, 10))
         self._forces_initialized = False
         if self.gravity_slider:
@@ -595,8 +602,8 @@ class GameLayout(Widget):
         A particle created directly under another particle can begin with an
         enormous positive LJ potential. Find the nearest position where it is
         at least one pair-equilibrium distance from every neighbour. Its speed
-        is chosen to match the sample's current kinetic temperature instead of
-        using the old, very hot hard-coded speed of 300 px/s.
+        follows the selected sample's temperature. Before selecting a phase,
+        new molecules drift slowly in all directions.
         """
         requested = (float(touch.pos[0]), float(touch.pos[1]))
         position = self._nearest_clear_spawn_position(requested)
@@ -604,12 +611,13 @@ class GameLayout(Widget):
             self.show_key_feedback('[color=ff7043]NO SAFE SPACE[/color]')
             return False
 
-        if self.molecules:
-            current_temperature = max(self._thermodynamic_metrics()[1], 0.0)
+        if self._projection_phase is None:
+            spawn_temperature = SANDBOX_TEMPERATURE
         else:
-            current_temperature = 0.5
-        spawn_temperature = max(SPAWN_MIN_TEMPERATURE,
-                                current_temperature + SPAWN_HEAT_STEP)
+            current_temperature = (max(self._thermodynamic_metrics()[1], 0.0)
+                                   if self.molecules else 0.5)
+            spawn_temperature = max(SPAWN_MIN_TEMPERATURE,
+                                    current_temperature + SPAWN_HEAT_STEP)
         speed = self._speed_for(spawn_temperature)
         angle = uniform(-math.pi, math.pi)
         vx = speed * math.cos(angle)
@@ -724,7 +732,7 @@ class GameLayout(Widget):
         self.epsilon    = self.SUBSTANCE_EPSILON
         self.sigma      = 1.0
         self.delta      = 1 / 60.0
-        self.gravity    = 0.0
+        self.gravity    = DEFAULT_BEAKER_GRAVITY
         self.use_verlet = True
         self._speed_factor  = 1.0
         self._base_interval = 1 / 30.0
@@ -735,7 +743,7 @@ class GameLayout(Widget):
             'epsilon_slider': self.SUBSTANCE_EPSILON,
             'sigma_slider':   1.0,
             'delta_slider':   1 / 60.0,
-            'gravity_slider': 0.0,
+            'gravity_slider': DEFAULT_BEAKER_GRAVITY,
             'speed_slider':   1.0,
             'size_slider':    0.6,
         }
@@ -796,7 +804,6 @@ class GameLayout(Widget):
         """Calculate acceleration and thermodynamic LJ terms at current positions."""
         for molecule in self.molecules:
             molecule.reset_total_force()
-            molecule.add_force(Vector(0, -self.gravity))
 
         self.apply_spring_force()
         if self.intermolecular_forces and len(self.molecules) >= 2:
@@ -820,8 +827,6 @@ class GameLayout(Widget):
             return 0.0, 0.0, 0.0
 
         kinetic = 0.0
-        gravitational = 0.0
-        bottom = self.pos[1]
         for molecule in self.molecules:
             try:
                 speed = molecule.total_velocity.length()
@@ -830,16 +835,12 @@ class GameLayout(Widget):
                 speed = 0.0
             kinetic += 0.5 * (speed / VELOCITY_UNIT) ** 2
 
-            y = molecule.pos[1]
-            gravitational += (self.gravity * max(y - bottom, 0.0)
-                              / INVERSE_MASS)
-
         temperature = 2.0 * kinetic / (DOF * n * K_B)
         area_px = self.size[0] * self.size[1]
         area_reduced = max(area_px / (LENGTH_UNIT ** 2), 1e-9)
         virial = self._lj_virial + getattr(self, '_collision_virial', 0.0)
         pressure = (n * K_B * temperature + virial / DOF) / area_reduced
-        total_energy = kinetic + self._lj_potential + gravitational
+        total_energy = kinetic + self._lj_potential
         return total_energy, temperature, pressure
 
     def _smooth_metrics(self, values, dt):
@@ -943,7 +944,7 @@ class GameLayout(Widget):
     def update(self, dt):
         """
         Update molecule positions, handle collisions, and update bonds.
-        Arduino integration affects: gravity, kinetic energy, temperature, and pressure.
+        Arduino input controls beaker gravity and the activity display.
         """
         arduino_data = self.arduino.get_xyz() if self.arduino else None
         if arduino_data:
@@ -990,16 +991,19 @@ class GameLayout(Widget):
         else:
             scale_factor = 1.0
 
+        # Slower gas playback keeps its temperature and interactions intact.
+        physics_delta = self.delta * (GAS_PLAYBACK_SPEED if self._projection_phase == 'gas' else 1.0)
+
         # Velocity Verlet needs forces at x(t) for the first half-kick. They
         # are cached between later steps and invalidated whenever state changes.
         if self.use_verlet:
             if not self._forces_initialized:
                 self._refresh_forces()
             steps = max(1, min(MAX_SUBSTEPS,
-                               int(math.ceil(self.delta / PHYSICS_SUBSTEP))))
+                               int(math.ceil(physics_delta / PHYSICS_SUBSTEP))))
             for mol in self.molecules:
                 mol.speed_cap = 2000
-                mol.move_verlet_a(self.delta / steps)
+                mol.move_verlet_a(physics_delta / steps)
 
         new_radius = self.size[0] * self.molecule_radius_ratio * self.size_factor
         if abs(new_radius - self._last_molecule_radius) > 0.1:
@@ -1028,13 +1032,13 @@ class GameLayout(Widget):
         # remaining half of this frame's Verlet step was already taken above,
         # so the first sub-step completes it and the rest are whole steps.
         steps  = max(1, min(MAX_SUBSTEPS,
-                            int(math.ceil(self.delta / PHYSICS_SUBSTEP))))
-        sub_dt = self.delta / steps
+                            int(math.ceil(physics_delta / PHYSICS_SUBSTEP))))
+        sub_dt = physics_delta / steps
         self._collision_impulse = 0.0
         for step in range(steps):
             self._integrate(sub_dt, first=(step == 0))
         # sum over collisions of r.dp, per unit reduced time = <sum r.F>
-        frame_time = self.delta * VELOCITY_UNIT / LENGTH_UNIT
+        frame_time = physics_delta * VELOCITY_UNIT / LENGTH_UNIT
         self._collision_virial = self._collision_impulse / max(frame_time, 1e-9)
 
         # Recalculate which interactions are visible and their colour only at
@@ -1046,7 +1050,7 @@ class GameLayout(Widget):
                 self._update_lj_viz()
             else:
                 self._update_lj_viz_positions()
-        self._update_beaker_projection()
+        self._update_beaker_projection(self.delta)
 
         damped = [m for m in self.molecules
                   if self.thermostat_active or m.thermo]
@@ -1174,18 +1178,6 @@ class GameLayout(Widget):
                     ),
                 })
 
-        if self.gravity > 0.5 and self.intermolecular_forces:
-            warnings.append({
-                'severity': 'low',
-                'title': 'Gravity + LJ forces  (not physical)',
-                'detail': (
-                    'At atomic scale, gravity is roughly 10¹⁸× weaker than '
-                    'intermolecular forces — real atoms are completely unaffected by '
-                    'gravity relative to their bonding. '
-                    'This combination is visually interesting but not chemically realistic.'
-                ),
-            })
-
         if self.intermolecular_forces and n > 80:
             warnings.append({
                 'severity': 'low',
@@ -1208,9 +1200,8 @@ class GameLayout(Widget):
         self._update_beaker_projection()
 
     def set_gravity(self, value):
-        """Update gravity for all molecules based on slider value."""
+        """Update the beaker's gravity control."""
         self.gravity = value
-        self._forces_initialized = False
 
     def set_epsilon(self, value):
         """Update the epsilon parameter for Lennard-Jones potential."""
@@ -1509,7 +1500,7 @@ class GameLayout(Widget):
             self._apply_update_interval()
 
     def _apply_physics_preset(self, gravity, epsilon, sigma):
-        """Set gravity, epsilon and sigma and sync their sliders."""
+        """Set beaker gravity, epsilon and sigma and sync their sliders."""
         self.set_gravity(gravity)
         self.set_epsilon(epsilon)
         self.set_sigma(sigma)
@@ -1669,13 +1660,13 @@ class GameLayout(Widget):
         self._update_beaker_projection()
 
     def toggle_beaker(self):
-        """Show or hide the non-physical live projection."""
+        """Show or hide the synchronized flask sample."""
         self.beaker.active = not self.beaker.active
         self.draw_beaker()
         return self.beaker.active
 
     def set_beaker_orientation(self, orientation):
-        """Switch the live projection between side and bird's-eye views."""
+        """Switch the flask sample between side and bird's-eye views."""
         self.beaker.orientation = orientation
         self.draw_beaker()
 
@@ -1684,7 +1675,7 @@ class GameLayout(Widget):
         self.beaker.fill(phase)
 
     def draw_beaker(self):
-        """Draw the live-projection vessel above the authoritative board."""
+        """Draw the flask and its sample above the main board."""
         back = getattr(self, '_beaker_back_group', None)
         group = getattr(self, '_beaker_group', None)
         if back is None or group is None:
@@ -1749,6 +1740,11 @@ class GameLayout(Widget):
 
     def _clear_beaker_projection(self):
         """Remove all cached miniature particle graphics."""
+        self._beaker_liquid_group.clear()
+        self._beaker_liquid_mesh = None
+        self._beaker_liquid_surface = None
+        self._beaker_bond_group.clear()
+        self._beaker_bond_lines.clear()
         group = getattr(self, '_beaker_projection_group', None)
         if group is not None:
             group.clear()
@@ -1757,134 +1753,77 @@ class GameLayout(Widget):
             projection.clear()
 
     def _beaker_projection_geometry(self, molecule):
-        """Map one board molecule into the flask without changing physics.
+        """Screen coordinates of a molecule in the flask's physical sample."""
+        return self._beaker_dynamics.geometry(molecule)
 
-        Both views preserve the molecule's normalized board coordinates. The
-        side view narrows horizontal positions with the flask profile; the top
-        view fits the complete rectangular board into the circular opening.
-        """
-        u = max(0.0, min(1.0,
-                (molecule.pos[0] - self.x) / max(self.width, 1.0)))
-        v = max(0.0, min(1.0,
-                (molecule.pos[1] - self.y) / max(self.height, 1.0)))
-        b = self.beaker
+    def _update_beaker_liquid(self):
+        """Draw the continuous pool beneath the liquid molecules."""
+        model = self._beaker_dynamics
+        group = self._beaker_liquid_group
+        if not (model.liquid and self.beaker.orientation == SIDE and model.molecules):
+            group.clear()
+            self._beaker_liquid_mesh = None
+            self._beaker_liquid_surface = None
+            return
+        if self._beaker_liquid_mesh is None:
+            group.add(Color(0.05, 0.39, 0.62, 0.32))
+            self._beaker_liquid_mesh = Mesh(vertices=[], indices=[], mode='triangle_fan')
+            group.add(self._beaker_liquid_mesh)
+            group.add(Color(0.15, 0.65, 0.94, 0.55))
+            self._beaker_liquid_surface = Line(width=1.0)
+            group.add(self._beaker_liquid_surface)
 
-        if b.orientation == TOP:
-            cx, cy, radius = b.top_circle
-            usable_radius = max(1.0, radius - b.wall * 0.75)
-            base_span = math.sqrt(2.0) * usable_radius
-            scale = min(base_span / max(self.width, 1.0),
-                        base_span / max(self.height, 1.0))
-            particle_radius = max(radius * 0.035,
-                                  min(radius * 0.075,
-                                      molecule.radius * scale * BEAKER_DOT_BOOST))
-            # Fit the complete particle disk, not only its centre, inside the
-            # circular glass even when the board point lies in a corner.
-            span = math.sqrt(2.0) * max(1.0,
-                                        usable_radius - particle_radius)
-            return (cx + (u - 0.5) * span,
-                    cy + (v - 0.5) * span,
-                    particle_radius)
+        level = min(model.height - model.wall, model.liquid_level + model.radius * 0.5)
+        heights = [model.wall]
+        if model.wall < model.height * 0.6 < level:
+            heights.append(model.height * 0.6)
+        heights.append(level)
+        x, y, width, _ = self.beaker.outer
+        scale = width / model.width
+        left, right = [], []
+        for height in heights:
+            lo, hi = self.beaker.profile_bounds(height / model.height)
+            slope = 0.3 * model.width / model.height if height < model.height * 0.6 else 0
+            margin = model.wall * math.sqrt(1 + slope * slope)
+            left.append((x + (lo * model.width + margin) * scale, y + height * scale))
+            right.append((x + (hi * model.width - margin) * scale, y + height * scale))
+        outline = left + right[::-1]
+        points = [(x + width * 0.5, y + model.wall * scale), *outline, outline[0]]
+        self._beaker_liquid_mesh.vertices = [value for px, py in points for value in (px, py, 0, 0)]
+        self._beaker_liquid_mesh.indices = list(range(len(points)))
+        self._beaker_liquid_surface.points = (*left[-1], *right[-1])
 
-        xf = getattr(self, '_beaker_xf', None) or self._beaker_side_transform()
-        x, y, width, height = b.outer
-        bx0, by0, bw, bh = xf['box']
-        t, s_iso, radius = xf['t'], xf['s_iso'], xf['radius']
+    def _update_beaker_bonds(self):
+        """Show the bonds that hold the solid lattice together."""
+        bonds = self._beaker_dynamics.solid_bonds
+        lines = self._beaker_bond_lines
+        group = self._beaker_bond_group
+        if bonds and not lines:
+            group.add(Color(0.18, 0.62, 0.9, 0.55))
+        for pair in bonds:
+            line = lines.get(pair)
+            if line is None:
+                line = Line(width=0.8)
+                group.add(line)
+                lines[pair] = line
+            ax, ay, _ = self._beaker_projection_geometry(pair[0])
+            bx, by, _ = self._beaker_projection_geometry(pair[1])
+            line.points = (ax, ay, bx, by)
+        for pair in set(lines) - bonds.keys():
+            group.remove(lines.pop(pair))
+        if not lines:
+            group.clear()
 
-        # compact cluster: one scale both ways, centred, resting on the floor
-        iso_x = x + width * 0.5 + (molecule.pos[0] - (bx0 + bw * 0.5)) * s_iso
-        iso_y = y + height * 0.075 + radius + (molecule.pos[1] - by0) * s_iso
-        # spread sample: fill the flask
-        fv = (molecule.pos[1] - by0) / max(bh, 1.0)
-        fu = (molecule.pos[0] - bx0) / max(bw, 1.0)
-        fill_v = float(np.interp(max(0.0, min(1.0, fv)), xf['area_q'], xf['area_v']))
-        fill_y = y + height * fill_v
-        lo_u, hi_u = b.profile_bounds((fill_y - y) / max(height, 1.0))
-        pad = b.wall * 0.42 + radius
-        fl, fr = x + width * lo_u + pad, x + width * hi_u - pad
-        fill_x = fl + max(0.0, min(1.0, fu)) * max(fr - fl, 0.0)
-
-        px = iso_x + (fill_x - iso_x) * t
-        py = iso_y + (fill_y - iso_y) * t
-        # always keep the whole dot inside the glass
-        lo_u, hi_u = b.profile_bounds((py - y) / max(height, 1.0))
-        left, right = x + width * lo_u + pad, x + width * hi_u - pad
-        if right < left:
-            left = right = (left + right) * 0.5
-        px = max(left, min(right, px))
-        py = max(y + height * 0.075 + radius, min(y + height * 0.93 - radius, py))
-        return px, py, radius
-
-    def _beaker_side_transform(self):
-        """Per-frame mapping from the sample to the flask (head-on view).
-
-        The flask used to squeeze the whole board in, about twice as hard
-        horizontally as vertically, which crushed a solid into overlapping
-        columns. It now maps the sample's own extent: a compact cluster (solid,
-        liquid) keeps its true shape at one uniform scale and rests on the
-        floor; a spread sample (gas) fills the flask. t blends the two so a
-        phase change slides rather than jumps. Dot size follows the same scale
-        so neighbours touch without overlapping.
-        """
-        b = self.beaker
-        x, y, width, height = b.outer
-        r = max(self.molecule_radius, 1.0)
-        if self.molecules:
-            xs = [m.pos[0] for m in self.molecules]
-            ys = [m.pos[1] for m in self.molecules]
-            box = (min(xs) - r, min(ys) - r,
-                   max(xs) - min(xs) + 2 * r, max(ys) - min(ys) + 2 * r)
-        else:
-            box = (self.x, self.y, self.width, self.height)
-
-        # smooth the outline so thermal motion does not make the view breathe
-        prev = getattr(self, '_beaker_box', None)
-        if prev is None:
-            self._beaker_box = box
-        else:
-            k = 0.2
-            self._beaker_box = tuple(p + k * (c - p) for p, c in zip(prev, box))
-        bx0, by0, bw, bh = self._beaker_box
-        bw, bh = max(bw, 2 * r), max(bh, 2 * r)
-
-        # 0 = compact cluster, 1 = fills the board
-        spread = min(bw / max(self.width, 1.0), bh / max(self.height, 1.0))
-        t = max(0.0, min(1.0, (spread - 0.45) / 0.30))
-
-        s_iso = min(width * 0.60 / bw, height * 0.50 / bh)
-        s_iso = min(s_iso, width * 0.050 / r)          # tiny clusters: cap dots
-        n = max(len(self.molecules), 1)
-        interior = width * height * 0.50
-        # gas dots sized well under the spacing per molecule, so they read as
-        # separate particles with room between them
-        r_fill = min(0.15 * math.sqrt(interior / n), width * 0.028)
-        r_iso = r * s_iso * 0.95
-        radius = r_iso + (r_fill - r_iso) * t
-        radius = max(3.0, min(width * 0.045, radius))
-
-        # Height -> cumulative glass area, so a gas spreads at even density.
-        # Mapped by height alone, the top of the sample was crammed into the
-        # narrow neck and clumped.
-        vs = np.linspace(0.075, 0.93, 48)
-        widths = np.array([max(b.profile_bounds(v)[1] - b.profile_bounds(v)[0],
-                               1e-6) for v in vs])
-        cum = np.concatenate(([0.0], np.cumsum(0.5 * (widths[1:] + widths[:-1])
-                                               * np.diff(vs))))
-        cum /= cum[-1]
-
-        self._beaker_xf = {'box': (bx0, by0, bw, bh), 't': t,
-                           's_iso': s_iso, 'radius': radius,
-                           'area_q': cum, 'area_v': vs}
-        return self._beaker_xf
-
-    def _update_beaker_projection(self):
-        """Synchronize one miniature graphic with every real molecule."""
+    def _update_beaker_projection(self, step_dt=0.0):
+        """Synchronize the sample, optionally advance it, then update its graphics."""
         if (not getattr(self, 'beaker', None) or not self.beaker.active
                 or self.width < 10):
             self._clear_beaker_projection()
             return
-        if self.beaker.orientation != TOP:
-            self._beaker_side_transform()
+        self._beaker_dynamics.synchronize()
+        self._beaker_dynamics.advance(step_dt)
+        self._update_beaker_liquid()
+        self._update_beaker_bonds()
 
         group = getattr(self, '_beaker_projection_group', None)
         if group is None:
@@ -1950,6 +1889,7 @@ class GameLayout(Widget):
         self.clear_bonds()
         self._clear_lj_viz()
         self._clear_beaker_projection()
+        self._beaker_dynamics.clear()
         self._projection_phase = None
         for molecule in self.molecules:
             self.remove_widget(molecule)

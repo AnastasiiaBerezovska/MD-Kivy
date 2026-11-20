@@ -39,6 +39,13 @@ from mdkivy.simulation.energy_bar import EnergyBar
 from mdkivy.simulation.energy_input import EnergyInputWidget
 from mdkivy.simulation.stability_graph import StabilityGraph
 from mdkivy.paths import FONT_IMPACT
+from mdkivy.typography import (
+    BACK_FONT_FRACTION,
+    CONTROL_FONT_FRACTION,
+    READOUT_LABEL_FONT_FRACTION,
+    READOUT_VALUE_FONT_FRACTION,
+    scaled_font_size,
+)
 
 Clock.max_iteration = 20
 
@@ -51,6 +58,7 @@ class GameScreen(Screen):
         super().__init__(**kwargs)
 
         self.name = "GameScreen"
+        self._font_scaled = []
 
         self.monitor = PerformanceMonitor()
 
@@ -108,13 +116,13 @@ class GameScreen(Screen):
         self.energy_input_label = Label(
             text='[b]Energy Input[/b]',
             markup=True,
-            font_size=_UI_H * 0.028,
             color=(1.0, 0.6, 0.2, 1),
             size_hint=(0.14, 0.04),
             pos_hint={'right': 0.99, 'top': 0.51},
             halign='center', valign='middle',
             opacity=0,
         )
+        self._scale_font(self.energy_input_label, READOUT_LABEL_FONT_FRACTION)
         self.energy_input_label.bind(size=self.energy_input_label.setter('text_size'))
 
         self._energy_input_visible = False
@@ -150,7 +158,6 @@ class GameScreen(Screen):
         self.cpu_usage_label = Label(
             text="[b]Computing Load[/b]",
             markup=True,
-            font_size=_UI_H * 0.038,
             color=(0.25, 0.52, 0.88, 1),
             size_hint=(0.16, 0.04),
             pos_hint={'center_x': 0.08, 'y': 0.272},
@@ -158,6 +165,7 @@ class GameScreen(Screen):
             valign='middle',
             opacity=1
         )
+        self._scale_font(self.cpu_usage_label, READOUT_LABEL_FONT_FRACTION)
         self.cpu_usage_label.bind(size=self.cpu_usage_label.setter('text_size'))
         self.root.add_widget(self.cpu_usage_label)
 
@@ -171,7 +179,6 @@ class GameScreen(Screen):
         self.arduino_graph_label = Label(
             text="[b]Arduino Energy Input[/b]",
             markup=True,
-            font_size=_UI_H * 0.030,
             color=(1, 1, 1, 1),
             size_hint=(0.15, 0.05),
             pos_hint={'right': 0.99, 'top': 0.41},
@@ -179,6 +186,7 @@ class GameScreen(Screen):
             valign='middle',
             opacity=0
         )
+        self._scale_font(self.arduino_graph_label, READOUT_LABEL_FONT_FRACTION)
         self.arduino_graph_label.bind(size=self.arduino_graph_label.setter('text_size'))
 
         self._arduino_graph_visible = False
@@ -262,6 +270,17 @@ class GameScreen(Screen):
 
         self._build_makey_counters(self.root)
         Clock.schedule_interval(lambda dt: self._refresh_makey_counters(), 0.1)
+        Window.bind(on_resize=self._rescale_fonts)
+
+    def _scale_font(self, widget, fraction):
+        """Use the same window-relative text sizes as the two-player game."""
+        self._font_scaled.append((widget, fraction))
+        widget.font_size = scaled_font_size(Window.height, fraction)
+        return widget
+
+    def _rescale_fonts(self, *_):
+        for widget, fraction in self._font_scaled:
+            widget.font_size = scaled_font_size(Window.height, fraction)
 
 
     def _build_makey_status(self, root):
@@ -1060,6 +1079,8 @@ class GameScreen(Screen):
         row_height = dp(310) if desc_text else dp(136)
         row = BoxLayout(orientation='vertical', size_hint=(1, None), height=row_height,
                         spacing=dp(6), padding=[dp(14), dp(10), dp(14), dp(10)])
+        row.bind(minimum_height=lambda inst, height: setattr(
+            inst, 'height', max(row_height, height)))
         lbl = Label(text=label_text, font_size='28sp', bold=True,
                     color=(1, 1, 1, 1), halign='left', valign='middle',
                     size_hint=(1, None), height=dp(30))
@@ -1070,11 +1091,16 @@ class GameScreen(Screen):
         btn_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=dp(48), spacing=dp(4))
 
         def _make_btn(text):
-            b = Button(text=text, font_size='23sp', bold=True,
+            b = Button(text=text, bold=True,
                        color=_TXT_OFF,
                        background_normal='', background_down='',
                        background_color=(0, 0, 0, 0),
                        size_hint=(None, 1), width=dp(110))
+            self._scale_font(b, CONTROL_FONT_FRACTION)
+            def _fit_text(inst, size):
+                inst.width = max(dp(110), size[0] + dp(20))
+                btn_row.height = max(dp(48), size[1] + dp(12))
+            b.bind(texture_size=_fit_text)
             with b.canvas.before:
                 Color(*_BOX_BG)
                 _bg = RoundedRectangle(pos=b.pos, size=b.size, radius=[10])
@@ -1122,11 +1148,6 @@ class GameScreen(Screen):
     def create_sliders(self):
         """Build the settings drawer."""
         pad = max(5, int(_UI_H * 0.007))
-        _back_w = int(_UI_H * 0.10 * 1.8)
-        self.back_button = self._make_top_btn("BACK", self.go_back)
-        self.back_button.size_hint = (None, 1.45)
-        self.back_button.width     = _back_w
-        self.back_button.pos_hint  = {'center_y': -0.55}
 
         ui_panel = FloatLayout(
             size_hint=(0.36, 1.0),
@@ -1167,13 +1188,12 @@ class GameScreen(Screen):
                 Animation(height=80, opacity=1, duration=0.12).start(lbl)
 
         gravity_box = SliderBox(
-            "Gravity (W increase, S decrease)",
-            0, 10, 0, 0.01, self.game_area.set_gravity,
+            "Beaker Gravity (W increase, S decrease)",
+            0, 10, self.game_area.gravity, 0.01, self.game_area.set_gravity,
             info_text=(
-                "Pulls all molecules downward. Drag up then click START — molecules fall and bounce off the floor. "
-                "At 10 they pile up at the bottom like a dense atmosphere. "
-                "Zero = weightless, molecules drift freely. "
-                "Combine with Forces ON to see gravity compete with molecular attraction."
+                "Strengthens the downward pull inside the Head-on beaker. "
+                "The beaker has gravity even at zero; increasing this makes it stronger. "
+                "Molecules in the main arena drift freely."
             ),
             info_callback=_show_slider_info,
             size_hint=(1, 1)
@@ -1313,10 +1333,6 @@ class GameScreen(Screen):
         verlet_row.set_active(not self.game_area.use_verlet)
         self._prediction_toggle = verlet_row
 
-        back_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=dp(60))
-        back_row.add_widget(Widget(size_hint_x=1))
-        back_row.add_widget(self.back_button)
-        content.add_widget(back_row)
         content.add_widget(lines_row)
         content.add_widget(vecs_row)
         content.add_widget(verlet_row)
@@ -1439,15 +1455,17 @@ class GameScreen(Screen):
     _BTN_ACTIVE = (0.45, 0.78, 1.00, 1.0)
     _BTN_ON_TEXTS = ('STOP', 'FORCES ON')
 
-    def _make_top_btn(self, text, callback, accent=(0.30, 0.50, 0.85), bold=True):
+    def _make_top_btn(self, text, callback, accent=(0.30, 0.50, 0.85), bold=True,
+                      font_fraction=CONTROL_FONT_FRACTION):
         """Top-bar button: white when idle, light blue on press/active."""
         btn = Button(
-            text=text, font_size='22sp', bold=True,
+            text=text, bold=True,
             color=self._BTN_IDLE,
             background_normal='', background_down='',
             background_color=(0, 0, 0, 0),
             size_hint=(0.60, 1),
         )
+        self._scale_font(btn, font_fraction)
         with btn.canvas.before:
             Color(0.04, 0.08, 0.20, 0.50)
             _bg = RoundedRectangle(pos=btn.pos, size=btn.size, radius=[10])
@@ -1468,7 +1486,6 @@ class GameScreen(Screen):
         """Build the top bar."""
         bar_h         = _UI_H * 0.125
         _icon_sz      = int(bar_h * 1.6)
-        _back_w       = int(bar_h * 1.8)
         _settings_w   = int(bar_h * 2.2)
         _forces_lbl_w = int(bar_h * 2.4)
         bar = BoxLayout(
@@ -1523,12 +1540,13 @@ class GameScreen(Screen):
 
         def _make_bar_btn(text, size_hint_x=1):
             b = Button(
-                text=text, font_size='31sp', bold=True,
+                text=text, bold=True,
                 background_normal='', background_down='', background_color=(0,0,0,0),
                 color=self._BTN_IDLE,
                 size_hint=(size_hint_x, 1.45),
                 pos_hint={'center_y': -0.55},
             )
+            self._scale_font(b, CONTROL_FONT_FRACTION)
             with b.canvas.before:
                 _fc = Color(0.03, 0.06, 0.16, 0.30)
                 _fr = RoundedRectangle(pos=b.pos, size=b.size, radius=[14])
@@ -1543,6 +1561,12 @@ class GameScreen(Screen):
             return b
 
         bar.add_widget(Widget(size_hint=(None, 1), width=dp(8)))
+        self.back_button = self._make_top_btn(
+            "BACK", self.go_back, font_fraction=BACK_FONT_FRACTION)
+        self.back_button.size_hint = (None, None)
+        self.back_button.pos_hint = {'center_y': -0.35}
+        bar.add_widget(self.back_button)
+
         self.play_pause_button = HoverItem(
             size_hint=(None, None), width=_icon_sz, height=_icon_sz,
             pos_hint={'center_y': -0.35},
@@ -1600,19 +1624,15 @@ class GameScreen(Screen):
         self._beaker_btn = _make_bar_btn("Beaker", size_hint_x=0.85)
         self._beaker_btn.bind(on_press=lambda *_: self._toggle_beaker())
         middle.add_widget(self._beaker_btn)
-        self._beaker_view_btn = _make_bar_btn("Head-on", size_hint_x=0.95)
-        self._beaker_view_btn.bind(on_press=lambda *_: self._toggle_beaker_view())
-        self._beaker_view_btn.opacity = 0
-        self._beaker_view_btn.disabled = True
-        middle.add_widget(self._beaker_view_btn)
 
         middle.add_widget(Widget(size_hint=(None, 1), width=dp(20)))
         _forces_lbl = Label(text="Calculate Forces\nBetween Atoms:", color=(1.0, 1.0, 1.0, 1.0),
-                             font_size='21sp', bold=True,
+                             bold=True,
                              size_hint=(None, 1), width=_forces_lbl_w,
                              halign='left', valign='middle',
                              text_size=(_forces_lbl_w, None),
                              pos_hint={'center_y': -0.55})
+        self._scale_font(_forces_lbl, READOUT_LABEL_FONT_FRACTION)
         middle.add_widget(_forces_lbl)
         self._forces_on_seg  = _make_bar_btn("On",  size_hint_x=0.7)
         self._forces_off_seg = _make_bar_btn("Off", size_hint_x=0.7)
@@ -1624,36 +1644,39 @@ class GameScreen(Screen):
 
 
         self._settings_top_btn = self._make_top_btn("Settings", self.toggle_sliders)
-        self._settings_top_btn.font_size = '28sp'
         self._settings_top_btn.size_hint = (None, 1.45)
         self._settings_top_btn.width     = _settings_w
         self._settings_top_btn.pos_hint  = {'center_y': -0.55}
         bar.add_widget(self._settings_top_btn)
         bar.add_widget(Widget(size_hint=(None, 1), width=dp(8)))
 
+        def _fit_control_widths(*_):
+            # Leave room for the shared font size even in the minimum window.
+            icon_size = min(_icon_sz, bar.width * 0.065)
+            for icon in (self.play_pause_button, self.reset_button):
+                icon.size = (icon_size, icon_size)
+            self.back_button.size = (
+                max(icon_size * 0.95, self.back_button.texture_size[0] + dp(24)),
+                max(dp(48), icon_size * 0.70),
+            )
+            self._settings_top_btn.width = max(
+                min(_settings_w, bar.width * 0.09),
+                self._settings_top_btn.texture_size[0] + dp(20),
+            )
+            _forces_lbl.width = bar.width * 0.085
+            _forces_lbl.text_size = (_forces_lbl.width, None)
+
+        bar.bind(width=_fit_control_widths)
+        self.back_button.bind(texture_size=_fit_control_widths)
+        self._settings_top_btn.bind(texture_size=_fit_control_widths)
+        _fit_control_widths()
+
         return bar
 
     def _toggle_beaker(self):
-        """Show or hide the live projection and its view switch."""
+        """Show or hide the tall beaker and its live sample."""
         active = self.game_area.toggle_beaker()
         self._beaker_btn.color = self._BTN_ACTIVE if active else self._BTN_IDLE
-        self._beaker_view_btn.opacity  = 1 if active else 0
-        self._beaker_view_btn.disabled = not active
-        if active:
-            self._sync_beaker_view_btn()
-
-    def _toggle_beaker_view(self):
-        """Switch the same live projection between side and bird's-eye views."""
-        from mdkivy.simulation.beaker import SIDE, TOP
-        nxt = TOP if self.game_area.beaker.orientation == SIDE else SIDE
-        self.game_area.set_beaker_orientation(nxt)
-        self._sync_beaker_view_btn()
-
-    def _sync_beaker_view_btn(self):
-        from mdkivy.simulation.beaker import SIDE
-        side = self.game_area.beaker.orientation == SIDE
-        self._beaker_view_btn.text  = "Head-on" if side else "Bird's-eye"
-        self._beaker_view_btn.color = self._BTN_ACTIVE
 
     def _select_preset(self, name):
         self.generated_selected_preset(name)
@@ -1811,15 +1834,11 @@ class GameScreen(Screen):
             self._refresh_stability_ui()
 
     def _sync_beaker_buttons(self):
-        """Match the top-bar buttons to the beaker's actual state."""
+        """Match the top-bar Beaker button to the beaker's actual state."""
         if not hasattr(self, '_beaker_btn'):
             return
         active = self.game_area.beaker.active
         self._beaker_btn.color = self._BTN_ACTIVE if active else self._BTN_IDLE
-        self._beaker_view_btn.opacity  = 1 if active else 0
-        self._beaker_view_btn.disabled = not active
-        if active:
-            self._sync_beaker_view_btn()
 
     def on_pre_enter(self, *args):
         self._sync_beaker_buttons()
@@ -2111,20 +2130,19 @@ class GameScreen(Screen):
 
     def add_stat_labels(self, root):
         """Stats stacked on the left side, overlaid on the game area."""
-        fs_hdr = _UI_H * 0.046
-        fs_val = _UI_H * 0.078
-
         def _hdr(text, color, pos_hint):
-            l = Label(text=text, font_size=fs_hdr, bold=True, color=color,
+            l = Label(text=text, bold=True, color=color,
                       size_hint=(0.30, 0.055), pos_hint=pos_hint,
                       halign='left', valign='bottom')
+            self._scale_font(l, READOUT_LABEL_FONT_FRACTION)
             l.bind(size=l.setter('text_size'))
             return l
 
         def _val(text, color, pos_hint):
-            l = Label(text=text, font_size=fs_val, bold=True, color=color,
+            l = Label(text=text, bold=True, color=color,
                       size_hint=(0.24, 0.085), pos_hint=pos_hint,
                       halign='left', valign='top')
+            self._scale_font(l, READOUT_VALUE_FONT_FRACTION)
             l.bind(size=l.setter('text_size'))
             return l
 

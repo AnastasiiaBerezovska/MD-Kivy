@@ -1,4 +1,4 @@
-"""Flask geometry for the synchronized simulation projection."""
+"""Flask geometry for the gravity-driven sample inset."""
 
 import math
 from random import uniform
@@ -201,12 +201,7 @@ class Beaker:
         return out
 
     def fill(self, phase):
-        """Select a phase on the main board and mirror it in the flask.
-
-        The beaker is a display projection, not a second physical system. This
-        compatibility entry point therefore delegates to the authoritative
-        whole-board preset instead of creating independently simulated atoms.
-        """
+        """Select a main-board phase and synchronize the flask's sample."""
         generator = getattr(self.layout, f'generate_{phase}', None)
         if generator is None:
             raise ValueError(f'Unknown phase: {phase}')
@@ -214,5 +209,11 @@ class Beaker:
         self.layout._update_beaker_projection()
 
     def view_gravity(self):
-        """The projection never applies forces to the authoritative system."""
-        return 0.0
+        """Reduced downward acceleration in the side view.
+
+        The flask always demonstrates gravity. The beaker's gravity control
+        adds to it; a bird's-eye view has no gravity component in its plane.
+        """
+        if self.orientation == TOP:
+            return 0.0
+        return 0.3 + max(0.0, self.layout.gravity) * 0.05
