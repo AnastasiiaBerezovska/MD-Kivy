@@ -1688,12 +1688,11 @@ class GameLayout(Widget):
 
         b = self.beaker
         if b.orientation == TOP:
-            x, y, width, height = b.outer
             cx, cy, r = b.top_circle
-            back.add(Color(0.01, 0.01, 0.04, 1.0))
-            back.add(Rectangle(pos=(x, y), size=(width, height)))
-            back.add(Color(0.005, 0.008, 0.025, 0.94))
+            back.add(Color(0.01, 0.015, 0.035, 1.0))
             back.add(Ellipse(pos=(cx - r, cy - r), size=(r * 2, r * 2)))
+            group.add(Color(0.50, 0.80, 1.0, 0.10))
+            group.add(Line(circle=(cx, cy, r), width=b.wall * 0.65))
             group.add(Color(0.72, 0.86, 0.96, 0.85))
             group.add(Line(circle=(cx, cy, r), width=b.wall * 0.5))
             group.add(Color(0.90, 0.96, 1.0, 0.55))
@@ -1705,11 +1704,9 @@ class GameLayout(Widget):
         (nlx, nly), (slx, sly), (flx, fly), (frx, fry), (srx, sry), (nrx, nry) = pts
         x, y, width, height = b.outer
 
-        # A nearly opaque inset prevents full-size board particles passing
-        # behind this screen region from being mistaken for flask contents.
-        back.add(Color(0.01, 0.01, 0.04, 1.0))
-        back.add(Rectangle(pos=(x, y), size=(width, height)))
-        back.add(Color(0.005, 0.008, 0.025, 0.94))
+        # Darken only the flask interior to isolate its miniature sample.
+        # Molecules outside its sloping walls remain fully visible.
+        back.add(Color(0.01, 0.015, 0.035, 1.0))
         back.add(Quad(points=[flx, fly, frx, fry, srx, sry, slx, sly]))
         back.add(Rectangle(pos=(nlx, sly), size=(nrx - nlx, nly - sly)))
 
@@ -1722,11 +1719,26 @@ class GameLayout(Widget):
             group.add(Line(points=[lo + (hi - lo) * 0.55, gy,
                                      hi - (hi - lo) * 0.12, gy], width=1.1))
 
-        group.add(Color(0.74, 0.87, 0.97, 0.95))
         flat = []
         for px, py in pts:
             flat.extend((px, py))
+        group.add(Color(0.50, 0.80, 1.0, 0.10))
+        group.add(Line(points=flat, width=b.wall * 0.65,
+                       joint='round', cap='round'))
+        group.add(Color(0.74, 0.87, 0.97, 0.78))
         group.add(Line(points=flat, width=b.wall * 0.45,
+                       joint='round', cap='round'))
+        group.add(Color(0.92, 0.98, 1.0, 0.70))
+        group.add(Line(points=flat, width=max(1.0, b.wall * 0.08),
+                       joint='round', cap='round'))
+
+        # A soft reflection inside the left edge gives the clear glass depth.
+        inset = b.wall * 0.70
+        group.add(Color(0.70, 0.90, 1.0, 0.16))
+        group.add(Line(points=[nlx + inset, nly - height * 0.08,
+                               slx + inset, sly,
+                               flx + inset, fly + b.wall * 0.80],
+                       width=max(1.0, width * 0.004),
                        joint='round', cap='round'))
 
         group.add(Color(0.92, 0.97, 1.0, 0.90))

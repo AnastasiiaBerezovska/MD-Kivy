@@ -12,9 +12,9 @@ class CustomSlider(Widget):
     is_active     = BooleanProperty(False)
     track_image   = StringProperty("")
     thumb_image   = StringProperty("")
+    thumb_diameter = NumericProperty(28)
+    track_height = NumericProperty(6)
 
-    _TRACK_H   = 6
-    _THUMB_D   = 28
     _FILL_CLR  = (0.15, 0.55, 1.0,  1.0)
     _TRACK_CLR = (0.18, 0.22, 0.32, 1.0)
     _THUMB_CLR = (0.20, 0.60, 1.0,  1.0)
@@ -26,17 +26,18 @@ class CustomSlider(Widget):
 
         with self.canvas:
             Color(*self._TRACK_CLR)
-            self._track_bg = RoundedRectangle(pos=(0, 0), size=(1, self._TRACK_H),
-                                              radius=[(self._TRACK_H // 2,) * 2] * 4)
+            self._track_bg = RoundedRectangle(pos=(0, 0), size=(1, self.track_height),
+                                              radius=[(self.track_height / 2,) * 2] * 4)
             Color(*self._FILL_CLR)
-            self._track_fill = RoundedRectangle(pos=(0, 0), size=(1, self._TRACK_H),
-                                                radius=[(self._TRACK_H // 2,) * 2] * 4)
+            self._track_fill = RoundedRectangle(pos=(0, 0), size=(1, self.track_height),
+                                                radius=[(self.track_height / 2,) * 2] * 4)
             Color(*self._GLOW_CLR)
-            self._glow = Ellipse(pos=(0, 0), size=(self._THUMB_D + 14,) * 2)
+            self._glow = Ellipse(pos=(0, 0), size=(self.thumb_diameter + 14,) * 2)
             Color(*self._THUMB_CLR)
-            self._thumb = Ellipse(pos=(0, 0), size=(self._THUMB_D,) * 2)
+            self._thumb = Ellipse(pos=(0, 0), size=(self.thumb_diameter,) * 2)
 
-        self.bind(pos=self._redraw, size=self._redraw, value=self._redraw)
+        self.bind(pos=self._redraw, size=self._redraw, value=self._redraw,
+                  thumb_diameter=self._redraw, track_height=self._redraw)
 
 
     def on_touch_down(self, touch):
@@ -68,32 +69,34 @@ class CustomSlider(Widget):
 
     def _move(self, touch_x):
         x_min = self.x
-        x_max = x_min + self.slider_length - self._THUMB_D
+        x_max = x_min + self.slider_length - self.thumb_diameter
         raw = self.min + (self.max - self.min) * ((min(max(touch_x, x_min), x_max) - x_min)
-                                                    / max(self.slider_length - self._THUMB_D, 1))
+                                                    / max(self.slider_length - self.thumb_diameter, 1))
         self.value = max(self.min, min(round((raw - self.min) / self.step) * self.step + self.min,
                                        self.max))
 
     def _thumb_x(self):
         """Absolute x of the left edge of the thumb."""
         return self.x + (self.value - self.min) / max(self.max - self.min, 1e-9) * (
-            self.slider_length - self._THUMB_D)
+            self.slider_length - self.thumb_diameter)
 
     def _redraw(self, *_):
         self.slider_length = self.width
         cy = self.center_y
 
         tx = self._thumb_x()
-        th = self._TRACK_H
-        td = self._THUMB_D
+        th = self.track_height
+        td = self.thumb_diameter
         gd = td + 14
 
         self._track_bg.pos  = (self.x, cy - th / 2)
         self._track_bg.size = (self.slider_length, th)
+        self._track_bg.radius = [(th / 2, th / 2)] * 4
 
         fill_w = max(tx - self.x + td / 2, th)
         self._track_fill.pos  = (self.x, cy - th / 2)
         self._track_fill.size = (fill_w, th)
+        self._track_fill.radius = [(th / 2, th / 2)] * 4
 
         self._glow.pos  = (tx + td / 2 - gd / 2, cy - gd / 2)
         self._glow.size = (gd, gd)

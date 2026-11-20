@@ -9,6 +9,7 @@ from kivy.uix.switch import Switch
 from kivy.uix.spinner import Spinner
 from kivy.uix.image import Image
 from kivy.uix.screenmanager import Screen, ScreenManager
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
 from kivy.core.window import Window
 from kivy.graphics import Color, Ellipse, Rectangle, Line, RoundedRectangle, PushMatrix, PopMatrix, Translate
@@ -39,11 +40,12 @@ from mdkivy.simulation.energy_bar import EnergyBar
 from mdkivy.simulation.energy_input import EnergyInputWidget
 from mdkivy.simulation.stability_graph import StabilityGraph
 from mdkivy.paths import FONT_IMPACT
-from mdkivy.typography import (
+from mdkivy.font_sizes import (
     BACK_FONT_FRACTION,
     CONTROL_FONT_FRACTION,
     READOUT_LABEL_FONT_FRACTION,
     READOUT_VALUE_FONT_FRACTION,
+    STAT_HEADING_FONT_FRACTION,
     scaled_font_size,
 )
 
@@ -52,6 +54,25 @@ Clock.max_iteration = 20
 
 class WindowManager(ScreenManager):
     pass
+
+
+class _SettingsPanel(FloatLayout):
+    """Keep settings gestures from reaching the simulation underneath."""
+
+    def on_touch_down(self, touch):
+        if not self.collide_point(*touch.pos):
+            return False
+        super().on_touch_down(touch)
+        return True
+
+    def on_touch_move(self, touch):
+        handled = super().on_touch_move(touch)
+        return handled or self.collide_point(*touch.pos)
+
+    def on_touch_up(self, touch):
+        handled = super().on_touch_up(touch)
+        return handled or self.collide_point(*touch.pos)
+
 
 class GameScreen(Screen):
     def __init__(self, **kwargs):
@@ -1068,27 +1089,28 @@ class GameScreen(Screen):
 
     def _make_drawer_toggle(self, label_text, on_cb, off_cb, on_label="On", off_label="Off", desc_text=None):
         """Toggle row - label + [On][Off] buttons with active/inactive highlight."""
-        import os as _os
-        _font = FONT_IMPACT
-
         _TXT_ON  = (1.0, 1.0, 1.0, 1.0)
         _TXT_OFF = (0.30, 0.55, 0.90, 1.0)
         _BOX_BG  = (0.03, 0.06, 0.13, 1.0)
         _BOX_BD  = (0.12, 0.25, 0.55, 0.55)
 
-        row_height = dp(310) if desc_text else dp(136)
-        row = BoxLayout(orientation='vertical', size_hint=(1, None), height=row_height,
-                        spacing=dp(6), padding=[dp(14), dp(10), dp(14), dp(10)])
-        row.bind(minimum_height=lambda inst, height: setattr(
-            inst, 'height', max(row_height, height)))
-        lbl = Label(text=label_text, font_size='28sp', bold=True,
+        row = BoxLayout(orientation='vertical', size_hint=(1, None))
+        row.bind(minimum_height=row.setter('height'))
+        lbl = Label(text=label_text, bold=True,
                     color=(1, 1, 1, 1), halign='left', valign='middle',
-                    size_hint=(1, None), height=dp(30))
-        lbl.bind(size=lbl.setter('text_size'))
-
-        row.add_widget(Widget(size_hint=(1, None), height=dp(16)))
+                    size_hint=(1, None))
+        self._scale_font(lbl, CONTROL_FONT_FRACTION)
+        lbl.bind(width=lambda inst, width: setattr(inst, 'text_size', (width, None)),
+                 texture_size=lambda inst, size: setattr(inst, 'height', size[1]))
 
         btn_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=dp(48), spacing=dp(4))
+
+        def _resize_spacing(*_):
+            row.spacing = max(dp(8), Window.height * 0.008)
+            btn_row.spacing = max(dp(8), Window.height * 0.006)
+
+        lbl.bind(font_size=_resize_spacing)
+        _resize_spacing()
 
         def _make_btn(text):
             b = Button(text=text, bold=True,
@@ -1098,8 +1120,8 @@ class GameScreen(Screen):
                        size_hint=(None, 1), width=dp(110))
             self._scale_font(b, CONTROL_FONT_FRACTION)
             def _fit_text(inst, size):
-                inst.width = max(dp(110), size[0] + dp(20))
-                btn_row.height = max(dp(48), size[1] + dp(12))
+                inst.width = max(dp(96), Window.height * 0.09, size[0] + dp(24))
+                btn_row.height = max(dp(48), Window.height * 0.052, size[1] + dp(16))
             b.bind(texture_size=_fit_text)
             with b.canvas.before:
                 Color(*_BOX_BG)
@@ -1119,16 +1141,12 @@ class GameScreen(Screen):
             on_btn.color  = _TXT_ON if is_on else _TXT_OFF
             off_btn.color = _TXT_ON if not is_on else _TXT_OFF
 
-        def _press_on(btn, touch):
-            if getattr(touch, 'button', 'left') != 'left': return
-            if not btn.collide_point(*touch.pos): return
+        def _press_on(*_):
             _activate(True); on_cb()
-        def _press_off(btn, touch):
-            if getattr(touch, 'button', 'left') != 'left': return
-            if not btn.collide_point(*touch.pos): return
+        def _press_off(*_):
             _activate(False); off_cb()
-        on_btn.bind(on_touch_down=_press_on)
-        off_btn.bind(on_touch_down=_press_off)
+        on_btn.bind(on_release=_press_on)
+        off_btn.bind(on_release=_press_off)
 
         btn_row.add_widget(on_btn)
         btn_row.add_widget(off_btn)
@@ -1136,43 +1154,47 @@ class GameScreen(Screen):
         row.add_widget(lbl)
         row.add_widget(btn_row)
         if desc_text:
-            desc = Label(text=desc_text, font_size='23sp', italic=True,
+            desc = Label(text=desc_text, italic=True,
                          color=(0.75, 0.80, 1.0, 1.0), halign='left', valign='top',
-                         size_hint=(0.88, None), height=dp(150))
-            desc.bind(width=lambda inst, val: setattr(inst, 'text_size', (val, None)))
-            row.add_widget(Widget(size_hint=(1, None), height=dp(8)))
+                         size_hint=(1, None), line_height=1.3)
+            self._scale_font(desc, READOUT_LABEL_FONT_FRACTION)
+            desc.bind(width=lambda inst, width: setattr(inst, 'text_size', (width, None)),
+                      texture_size=lambda inst, size: setattr(inst, 'height', size[1]))
             row.add_widget(desc)
         row.set_active = _activate
         return row
 
     def create_sliders(self):
-        """Build the settings drawer."""
-        pad = max(5, int(_UI_H * 0.007))
-
-        ui_panel = FloatLayout(
+        """Build a responsive settings drawer with a fixed header and scrolling body."""
+        ui_panel = _SettingsPanel(
             size_hint=(0.36, 1.0),
+            size_hint_min_x=dp(360),
             pos_hint={'right': 2.0, 'top': 1.0},
         )
 
-        bg_w = Widget(
-            size_hint=(1, 1.06),
-            pos_hint={'x': 0, 'top': 1.0},
+        drawer_layout = BoxLayout(orientation='vertical', pos_hint={'x': 0, 'y': 0})
+        header = BoxLayout(orientation='horizontal', size_hint_y=None)
+        scroll = ScrollView(
+            do_scroll_x=False, do_scroll_y=True,
+            scroll_type=['bars', 'content'], always_overscroll=False,
+            bar_color=(0.30, 0.60, 1.0, 0.9),
+            bar_inactive_color=(0.30, 0.60, 1.0, 0.4),
+            scroll_timeout=150,
         )
+        self._settings_scroll = scroll
 
         content = BoxLayout(
             orientation='vertical',
             size_hint=(1, None),
-            pos_hint={'x': 0, 'top': 0.94},
-            spacing=0, padding=0,
         )
         content.bind(minimum_height=content.setter('height'))
+        self._settings_content = content
 
         slider_grid = GridLayout(
-            cols=2, rows=3,
-            size_hint=(1, None), height=_UI_H * 0.56,
-            spacing=(4, 36),
-            padding=[8, 14, 8, 14]
+            cols=2,
+            size_hint=(1, None),
         )
+        slider_grid.bind(minimum_height=slider_grid.setter('height'))
 
         _active = [None]
         def _show_slider_info(text):
@@ -1191,7 +1213,7 @@ class GameScreen(Screen):
             "Beaker Gravity (W increase, S decrease)",
             0, 10, self.game_area.gravity, 0.01, self.game_area.set_gravity,
             info_text=(
-                "Strengthens the downward pull inside the Head-on beaker. "
+                "Strengthens the downward pull inside the tall beaker. "
                 "The beaker has gravity even at zero; increasing this makes it stronger. "
                 "Molecules in the main arena drift freely."
             ),
@@ -1258,6 +1280,7 @@ class GameScreen(Screen):
         slider_grid.add_widget(size_box)
         slider_grid.add_widget(sigma_box)
         slider_grid.add_widget(speed_box)
+        slider_boxes = (gravity_box, delta_box, epsilon_box, size_box, sigma_box, speed_box)
 
         self.game_area.gravity_slider = gravity_box.slider
         self.game_area.epsilon_slider = epsilon_box.slider
@@ -1275,28 +1298,28 @@ class GameScreen(Screen):
             function=lambda x: self.toggle_force_arrows()
         )
 
-        with bg_w.canvas.before:
-            Color(0.01, 0.03, 0.10, 0.84)
-            _drawer_bg = Rectangle(pos=bg_w.pos, size=bg_w.size)
+        with ui_panel.canvas.before:
+            Color(0.01, 0.03, 0.10, 1)
+            _drawer_bg = Rectangle(pos=ui_panel.pos, size=ui_panel.size)
             Color(0.20, 0.40, 0.80, 0.55)
-            _drawer_border = Line(rectangle=(bg_w.x, bg_w.y,
-                                             bg_w.width, bg_w.height), width=1.6)
+            _drawer_border = Line(rectangle=(*ui_panel.pos, *ui_panel.size), width=1.6)
         def _sync_drawer(*_):
-            _drawer_bg.pos  = bg_w.pos;  _drawer_bg.size  = bg_w.size
-            _drawer_border.rectangle = (bg_w.x, bg_w.y, bg_w.width, bg_w.height)
-        bg_w.bind(pos=_sync_drawer, size=_sync_drawer)
+            _drawer_bg.pos = ui_panel.pos
+            _drawer_bg.size = ui_panel.size
+            _drawer_border.rectangle = (*ui_panel.pos, *ui_panel.size)
+        ui_panel.bind(pos=_sync_drawer, size=_sync_drawer)
 
-        hdr_lbl = Label(text="Settings", font_size='46sp', bold=True,
+        hdr_lbl = Label(text="Settings", bold=True,
                         color=(1, 1, 1, 1), halign='left', valign='middle',
-                        size_hint=(0.75, None), height=60,
-                        pos_hint={'x': 0.04, 'top': 0.965})
+                        size_hint=(1, 1))
+        self._scale_font(hdr_lbl, READOUT_VALUE_FONT_FRACTION)
         hdr_lbl.bind(size=hdr_lbl.setter('text_size'))
 
-        close_btn = Button(text='×', font_size='22sp', bold=True,
-                           size_hint=(None, None), width=46, height=46,
-                           pos_hint={'right': 0.97, 'top': 0.965},
+        close_btn = Button(text='×', bold=True,
+                           size_hint=(None, None), pos_hint={'center_y': 0.5},
                            background_normal='', background_color=(0, 0, 0, 0),
                            color=(0.90, 0.92, 1.0, 1))
+        self._scale_font(close_btn, CONTROL_FONT_FRACTION)
         with close_btn.canvas.before:
             Color(0.10, 0.14, 0.26, 1)
             _cbg = Ellipse(pos=close_btn.pos, size=close_btn.size)
@@ -1308,7 +1331,9 @@ class GameScreen(Screen):
             _cbd.ellipse = (close_btn.x, close_btn.y,
                             close_btn.width, close_btn.height)
         close_btn.bind(pos=_sync_close, size=_sync_close,
-                       on_press=lambda *_: self.toggle_sliders())
+                       on_release=lambda *_: self.toggle_sliders())
+        header.add_widget(hdr_lbl)
+        header.add_widget(close_btn)
 
         def _lines_on():
             if not self.game_area.bonds_visible:  self.toggle_lj_lines()
@@ -1336,25 +1361,35 @@ class GameScreen(Screen):
         content.add_widget(lines_row)
         content.add_widget(vecs_row)
         content.add_widget(verlet_row)
-        content.add_widget(Widget(size_hint=(1, None), height=30))
         content.add_widget(slider_grid)
 
-        ui_panel.add_widget(bg_w)
-        ui_panel.add_widget(hdr_lbl)
-        ui_panel.add_widget(close_btn)
-        ui_panel.add_widget(content)
+        scroll.add_widget(content)
+        drawer_layout.add_widget(header)
+        drawer_layout.add_widget(scroll)
+        ui_panel.add_widget(drawer_layout)
 
-        from kivy.uix.floatlayout import FloatLayout as _FL
-        import types
-        def _block_down(touch):
-            _FL.on_touch_down(ui_panel, touch)
-            # stop clicks going through the drawer
-            return bg_w.collide_point(*touch.pos)
-        def _block_up(touch):
-            _FL.on_touch_up(ui_panel, touch)
-            return bg_w.collide_point(*touch.pos)
-        ui_panel.on_touch_down = types.MethodType(lambda s, t: _block_down(t), ui_panel)
-        ui_panel.on_touch_up   = types.MethodType(lambda s, t: _block_up(t),   ui_panel)
+        def _resize_drawer(*_):
+            height = Window.height
+            padding = max(dp(16), height * 0.018)
+            gap = max(dp(16), height * 0.018)
+            drawer_layout.padding = [padding, padding, padding, padding]
+            drawer_layout.spacing = gap
+            header.height = max(dp(56), height * 0.065)
+            header.spacing = gap
+            close_size = max(dp(44), height * 0.04)
+            close_btn.size = (close_size, close_size)
+            content.spacing = max(dp(24), height * 0.024)
+            content.padding = [0, 0, gap, gap]
+            scroll.bar_width = max(dp(5), height * 0.004)
+            scroll.scroll_wheel_distance = max(dp(48), height * 0.06)
+            slider_grid.cols = 2 if scroll.width >= max(dp(600), height * 0.44) else 1
+            slider_grid.spacing = [gap, gap]
+            for box in slider_boxes:
+                box.resize_ui(height)
+
+        ui_panel.bind(size=_resize_drawer)
+        scroll.bind(width=_resize_drawer)
+        _resize_drawer()
 
         return ui_panel
     
@@ -2134,7 +2169,7 @@ class GameScreen(Screen):
             l = Label(text=text, bold=True, color=color,
                       size_hint=(0.30, 0.055), pos_hint=pos_hint,
                       halign='left', valign='bottom')
-            self._scale_font(l, READOUT_LABEL_FONT_FRACTION)
+            self._scale_font(l, STAT_HEADING_FONT_FRACTION)
             l.bind(size=l.setter('text_size'))
             return l
 
@@ -2146,19 +2181,19 @@ class GameScreen(Screen):
             l.bind(size=l.setter('text_size'))
             return l
 
-        root.add_widget(_hdr("Total Energy  (0 = frozen solid)", (1.0, 0.75, 0.3, 0.90),
+        root.add_widget(_hdr("Total Energy", (1.0, 0.75, 0.3, 0.90),
                              {'x': 0.02, 'top': 0.750}))
         self.game_area.total_energy_label = _val(
             "0", (1.0, 0.6, 0.2, 1), {'x': 0.02, 'top': 0.695})
         root.add_widget(self.game_area.total_energy_label)
 
-        root.add_widget(_hdr("Pressure (avg)  100 \u00d7 P*", (0.55, 0.9, 1.0, 0.90),
+        root.add_widget(_hdr("Pressure", (0.55, 0.9, 1.0, 0.90),
                              {'x': 0.02, 'top': 0.615}))
         self.game_area.pressure_label = _val(
             "0", (0.35, 0.85, 1.0, 1), {'x': 0.02, 'top': 0.560})
         root.add_widget(self.game_area.pressure_label)
 
-        root.add_widget(_hdr("Temperature (avg)  kelvin", (1.0, 0.55, 0.75, 0.90),
+        root.add_widget(_hdr("Temperature (K)", (1.0, 0.55, 0.75, 0.90),
                              {'x': 0.02, 'top': 0.480}))
         self.game_area.temperature_label = _val(
             "0", (1.0, 0.32, 0.55, 1), {'x': 0.02, 'top': 0.425})

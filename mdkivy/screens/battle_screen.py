@@ -18,7 +18,7 @@ from kivy.animation import Animation
 from kivy.properties import NumericProperty
 from kivy.uix.image import Image
 from mdkivy.paths import FONT_IMPACT, TAP_ICON, STOMP_ICON
-from mdkivy.typography import (
+from mdkivy.font_sizes import (
     BACK_FONT_FRACTION,
     CONTROL_FONT_FRACTION,
     READOUT_LABEL_FONT_FRACTION,
@@ -49,6 +49,7 @@ SIDE_VOLUME = 4.88
 INTRO_FADE_IN  = 0.80
 INTRO_HOLD     = 1.00
 INTRO_FADE_OUT = 1.40
+WIN_CELEBRATION_SECONDS = 8.0
 
 C_PRESSURE  = (0.31, 0.76, 0.97)
 C_VOLUME    = (1.00, 0.62, 0.25)
@@ -750,7 +751,8 @@ class BattleScreen(Screen):
                 self._start_flood()
                 return False
         Clock.schedule_interval(_fade_div, 0.03)
-        self._lb_ev = Clock.schedule_once(self._go_to_leaderboard, 4.0)
+        self._lb_ev = Clock.schedule_once(
+            self._go_to_leaderboard, WIN_CELEBRATION_SECONDS)
 
     def _start_flood(self):
         self._state  = 'flooding'
